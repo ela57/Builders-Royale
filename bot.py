@@ -1,0 +1,209 @@
+"""Bounded navigation, independent legs/torso and survival priorities."""
+import math
+from pathlib import Path
+import random
+import time
+
+from brain import DESIRED, Memory, pick_offer, safe_point, take_weapon
+from combat import best_weapon, dodge, fire_control, unit
+from geo import Geo
+import mechfight as mf
+from navigation import Navigator
+
+
+class Bot:
+    name = 'Builders Royale'
+
+    def __init__(self, hello, geo=None):
+        root = Path(__file__).resolve().parent
+        map_dir = Path(hello.get('map', {}).get('dir', root / 'arena'))
+        if not (map_dir / 'v2/world.json').is_file():
+            map_dir = root / 'arena'
+        self.geo = geo if geo is not None else Geo(map_dir,root / 'navgrid.npz')
+        self.config = hello.get('config',{})
+        self.rng = random.Random(hello.get('seed',0))
+        self.nav = Navigator(self.geo)
+        self.memory = Memory()
+        self.mode = 'hide'
+        self.target_id = None
+        self.strafe = 1
+        self.switch_at = 0
+        self.cover = None
+        self.cover_at = -math.inf
+        self.cover_key = None
+        self.stuck_since = None
+        self.last_move = [0,0]
+        self.regenerating = False
+
+    def _cover(self, me, threats, circle, now, deadline):
+        key = tuple((t['id'],int(t['pos'][0]/8),int(t['pos'][1]/8)) for t in threats)
+        invalid = key != self.cover_key or (self.cover is not None and math.dist(self.cover,circle['center'])+2.5 > circle['radius'])
+        if (invalid or now >= self.cover_at) and time.perf_counter() < deadline-.004:
+            budget = min(4,max(0,(deadline-time.perf_counter())*1000-3))
+            self.cover = self.geo.find_cover(me['pos'],[t['pos'] for t in threats],circle,time_budget_ms=budget)
+            self.cover_at = now+1.5
+            self.cover_key = key
+        return self.cover
+
+    def _detour_safe(self, point, me, zone, now):
+        if math.dist(point[:2],zone['center'])+3 > zone['radius']:
+            return False
+        travel = (math.dist(me['pos'][:2],point[:2])+max(0,math.dist(point[:2],zone['next_center'])-.6*zone['next_radius']))/max(1,me.get('stats',{}).get('walk_speed',11.7))
+        return now+travel+10 < zone['shrink_start'] or math.dist(point[:2],zone['next_center'])+3 <= .6*zone['next_radius']
+
+    def _avoid_npcs(self, pos, move, target):
+        if not any(move):
+            return move
+        speed = math.hypot(*move)
+        for npc in self.memory.npcs.values():
+            if target is not None and target['id'] == npc['id']:
+                continue
+            dx,dy = pos[0]-npc['pos'][0],pos[1]-npc['pos'][1]
+            distance = math.hypot(dx,dy)
+            ahead = math.dist([pos[0]+move[0]*12,pos[1]+move[1]*12],npc['pos'][:2])
+            if distance < 50 or ahead < 50:
+                away = unit(dx,dy)
+                tangent = [-away[1],away[0]]
+                if tangent[0]*move[0]+tangent[1]*move[1] < 0:
+                    tangent = [-v for v in tangent]
+                move = [v*speed for v in unit(away[0]+tangent[0],away[1]+tangent[1])]
+        return move
+
+    def act(self, obs):
+        deadline = time.perf_counter()+.025
+        me,now,zone = obs['self'],obs['t'],obs['zone']
+        pos = me['pos']
+        self.memory.update(obs)
+        action = {'move':[0,0],'fire':[False,False],'boost':False}
+        pick = pick_offer(obs.get('offer'))
+        if pick is not None:
+            action['pick'] = pick
+        action.update(take_weapon(me,obs.get('pickups',[])))
+        safe,urgent,circle,_ = safe_point(me,zone,now)
+        threats = list(self.memory.enemies.values())
+        target = self.memory.primary(me,now)
+        visible_mechs = [a for a in obs.get('mechs',[]) if a.get('kind') == 'mech']
+        visible_ids = {a['id'] for a in obs.get('mechs',[])}
+        hp_ratio = me.get('hp',1400)/max(1,me.get('max_hp',1400))
+        near = [t for t in threats if now-t['seen'] < 3 and math.dist(pos[:2],t['pos'][:2]) <= 120]
+        stronger = bool(near) and me.get('hp',1400) > sum(e.get('hp',1400) for e in near)*.85 and me.get('cubes',0) >= max(e.get('cubes',0) for e in near)+2
+        engage = hp_ratio > .4 and len(near) <= (2 if stronger else 1)
+        if hp_ratio < .35 and threats:
+            self.regenerating = True
+        if hp_ratio >= .8:
+            self.regenerating = False
+        goal,move,speed = None,None,1
+        if urgent:
+            self.mode,goal = 'zone',safe
+            action['boost'] = me.get('energy',0) > 20
+        elif threats and (not engage or self.regenerating):
+            self.mode = 'disengage'
+            goal = self._cover(me,threats,circle,now,deadline)
+            if goal is None:
+                away = unit(pos[0]-target['pos'][0],pos[1]-target['pos'][1])
+                goal = [pos[0]+away[0]*30,pos[1]+away[1]*30]
+                if math.dist(goal,circle['center']) > circle['radius']-3:
+                    goal = safe
+            action['boost'] = me.get('energy',0) > 20
+        elif threats:
+            self.mode = 'engage'
+            if now >= self.switch_at:
+                self.strafe = self.rng.choice((-1,1))
+                self.switch_at = now+self.rng.uniform(.6,1.4)
+            dx,dy = target['pos'][0]-pos[0],target['pos'][1]-pos[1]
+            distance = math.hypot(dx,dy)
+            weapon = best_weapon(me,distance)
+            low,high = (25,38) if weapon and weapon['kind'] == 'lightning' else (50,110)
+            radial = 1 if distance > high else (-1 if distance < low else 0)
+            toward = unit(dx,dy)
+            move = unit(toward[0]*radial-toward[1]*self.strafe,toward[1]*radial+toward[0]*self.strafe)
+        elif self.regenerating and (hp_ratio < .8 or now-self.memory.last_damage < me.get('stats',{}).get('regen_delay',5)):
+            self.mode = 'regen'
+            goal = self._cover(me,[],circle,now,deadline)
+            speed = .4
+        else:
+            npc = self.memory.npcs.get(self.memory.attacker)
+            if npc and now-self.memory.last_damage < 8:
+                target = npc
+                self.mode = 'npc'
+                distance = math.dist(pos[:2],npc['pos'][:2])
+                move = unit(npc['pos'][0]-pos[0],npc['pos'][1]-pos[1]) if distance > 70 else [0,0]
+            elif now-self.memory.last_mech >= 3:
+                held = {w['kind'] for w in self.memory.weapons if w}
+                loot = [(math.dist(pos[:2],p['pos'][:2]),p) for p in obs.get('cubes',[]) if math.dist(pos[:2],p['pos'][:2]) < 70]
+                loot += [(math.dist(pos[:2],p['pos'][:2]),p) for p in obs.get('pickups',[]) if p['kind'] in DESIRED-held and math.dist(pos[:2],p['pos'][:2]) < 90]
+                loot = [(d,p) for d,p in loot if self._detour_safe(p['pos'],me,zone,now)]
+                if loot:
+                    self.mode,goal = 'loot',min(loot,key=lambda it:it[0])[1]['pos'][:2]
+                else:
+                    muzzle = [pos[0],pos[1],pos[2]+me.get('stats',{}).get('muzzle_height',7)]
+                    crates = sorted(obs.get('crates',[]),key=lambda c:math.dist(pos[:2],c['pos'][:2]))
+                    for crate in crates:
+                        if time.perf_counter() >= deadline-.012:
+                            break
+                        if math.dist(pos[:2],crate['pos'][:2]) < 60 and self._detour_safe(crate['pos'],me,zone,now) and self.geo.los(muzzle,[crate['pos'][0],crate['pos'][1],crate['pos'][2]+1.2]):
+                            target = {**crate,'kind':'crate'}
+                            self.mode,move = 'crate',[0,0]
+                            visible_ids.add(crate['id'])
+                            break
+                    if target is None and now-self.memory.last_mech >= 10:
+                        drops = [d for d in obs.get('drops',[]) if math.dist(pos[:2],d['pos'][:2]) < 80 and self._detour_safe(d['pos'],me,zone,now)]
+                        if drops:
+                            drop = min(drops,key=lambda d:math.dist(pos[:2],d['pos'][:2]))
+                            self.mode,goal = 'drop',drop['pos'][:2]
+                            if math.dist(pos[:2],goal) < max(1,drop.get('radius',8)-3):
+                                move = [0,0]
+                if goal is None and move is None and target is None:
+                    self.mode = 'hide'
+                    goal = self._cover(me,[],circle,now,deadline) or safe
+                    speed = .4
+            else:
+                self.mode = 'hide'
+                move = [0,0]
+        if goal is not None and move is None and time.perf_counter() < deadline-.007:
+            move = self.nav.move(pos,goal,now,budget_ms=min(8,(deadline-time.perf_counter())*1000-6),speed=speed)
+        move = move or [0,0]
+        evasion = dodge(me,visible_mechs,obs.get('projectiles',[]),self.geo,self.config,deadline-.004)
+        if evasion is not None:
+            move = evasion
+            action['boost'] = me.get('energy',0) > 0
+            self.mode = 'dodge'
+        move = self._avoid_npcs(pos,move,target)
+        look = [pos[0]+move[0]*3,pos[1]+move[1]*3]
+        if any(move) and not self.geo.walk_clear(pos,look):
+            move = [0,0]
+        actors = obs.get('mechs',[])+[{**c,'kind':'crate'} for c in obs.get('crates',[])]
+        if time.perf_counter() < deadline-.003:
+            aim,fire,reload = fire_control(me,target,target is not None and target['id'] in visible_ids,actors,self.geo,self.config,deadline-.001)
+            if aim is not None:
+                action['aim'] = aim
+            action['fire'],action['reload'] = fire,reload
+        if self.memory.damage_bearing is not None and now-self.memory.last_damage < .4 and self.memory.attacker not in visible_ids:
+            action['aim'] = [self.memory.damage_bearing,0]
+            action['fire'] = [False,False]
+        elif 'aim' not in action:
+            sounds = self.memory.sounds
+            yaw = sounds[-1][0]['bearing'] if sounds else (int(now/1.5) % 6)*math.pi/3
+            action['aim'] = [yaw,0]
+        attempted = self.nav.search is None and (any(self.last_move) or (goal is not None and math.dist(pos[:2],goal) > 3))
+        slow = math.hypot(*me.get('vel',[0,0,0])[:2]) < 1
+        if attempted and slow:
+            if self.stuck_since is None:
+                self.stuck_since = now
+            elif now-self.stuck_since >= 1:
+                action['jump'],action['boost'] = True,me.get('energy',0) > 0
+                if not any(move):
+                    yaw = self.rng.uniform(-math.pi,math.pi)
+                    move = [math.cos(yaw),math.sin(yaw)]
+                self.nav.invalidate()
+                self.stuck_since = now
+        else:
+            self.stuck_since = None
+        action['move'] = move
+        self.last_move = move
+        self.target_id = target['id'] if target is not None else None
+        return action
+
+
+if __name__ == '__main__':
+    mf.run(Bot)
