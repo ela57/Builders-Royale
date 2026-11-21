@@ -215,7 +215,7 @@ class BotTests(unittest.TestCase):
 
     def test_memory_expiry_took_sounds_and_reload(self):
         self.obs['mechs'] = [enemy()]
-        self.obs['events'] = [{'type':'took','slot':1,'kind':'laser'}]
+        self.obs['events'] = [{'type':'took','id':8000,'slot':1,'kind':'laser'}]
         self.obs['sounds'] = [{'kind':'gun','bearing':1,'age':0}]
         memory = Memory()
         memory.update(self.obs)
@@ -248,6 +248,7 @@ class BotTests(unittest.TestCase):
         self.bot.act(self.obs)
         self.assertEqual(self.bot.mode,'loot')
         self.obs['cubes'] = []
+        self.obs['self']['pos'] = [20,0,0]
         self.obs['crates'] = [{'id':1000,'pos':[40,0,0]}]
         self.bot.act(self.obs)
         self.assertEqual(self.bot.mode,'crate')
@@ -275,6 +276,33 @@ class BotTests(unittest.TestCase):
         action = self.bot.act(self.obs)
         self.assertTrue(action['jump'])
         self.assertTrue(action['boost'])
+
+    def test_remembered_loot_expiry_gone_and_kill_cleanup(self):
+        self.obs['pickups'] = [{'id':8000,'kind':'laser','pos':[60,0,0]}]
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'equip')
+        self.obs.update(t=1,pickups=[],mechs=[enemy(180)])
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'equip')
+        self.assertEqual(self.bot.nav.goal,(60,0))
+        self.obs['events'] = [{'type':'take_failed','id':8000,'reason':'gone'},{'type':'kill','target':1}]
+        self.obs['mechs'] = []
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.memory.pickups,{})
+        self.assertEqual(self.bot.memory.enemies,{})
+        self.obs.update(events=[],t=100)
+        self.bot.memory.pickups = {8001:{'id':8001,'kind':'laser','pos':[80,0,0],'seen':1}}
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.memory.pickups,{})
+
+    def test_loot_detour_rejects_danger_and_unreachable_roof(self):
+        self.obs['pickups'] = [{'id':8000,'kind':'laser','pos':[60,0,20]}]
+        self.bot.act(self.obs)
+        self.assertNotEqual(self.bot.mode,'equip')
+        self.obs['pickups'][0]['pos'][2] = 0
+        self.obs['mechs'] = [enemy(70)]
+        self.bot.act(self.obs)
+        self.assertNotEqual(self.bot.mode,'equip')
 
     def test_empty_observation_and_time_guards(self):
         action = self.bot.act(self.obs)

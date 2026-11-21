@@ -87,3 +87,7 @@ python3 -m unittest discover -s tools/sim -p 'test_*.py'
 Before 150 s, a gun-only pilot with no visible safe loot explores nearby open
 areas inside the safe circle instead of standing still. Navigation fallback and
 combat movement are not zeroed simply because a straight segment touches a wall.
+Pickups/crates are remembered for 90 s and cubes for 20 s, with stale nearby
+items and confirmed kills removed. Early gun-only pilots take safe remembered
+weapon detours even while watching a distant enemy, rather than forgetting loot
+as soon as it leaves the view wedge.

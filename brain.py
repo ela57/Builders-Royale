@@ -54,10 +54,21 @@ class Memory:
         self.attacker = None
         self.sounds = []
         self.weapons = [None,None]
+        self.pickups = {}
+        self.crates = {}
+        self.cubes = {}
 
     def update(self, obs):
         now = obs['t']
         self.weapons = list(obs['self'].get('weapons',[None,None]))
+        for name,ttl in (('pickups',90),('crates',90),('cubes',20)):
+            records = getattr(self,name)
+            visible = {item['id'] for item in obs.get(name,[])}
+            for item in obs.get(name,[]):
+                records[item['id']] = {**item,'seen':now}
+            records = {i:item for i,item in records.items() if now-item['seen'] < ttl and
+                       (i in visible or math.dist(obs['self']['pos'][:2],item['pos'][:2]) > 5)}
+            setattr(self,name,records)
         for actor in obs.get('mechs',[]):
             record = {**actor,'seen':now}
             if actor.get('kind') == 'mech':
@@ -72,6 +83,7 @@ class Memory:
                 self.last_damage,self.attacker = now,event.get('by')
                 self.damage_bearing = event.get('bearing')
             elif event['type'] == 'took':
+                self.pickups.pop(event['id'],None)
                 slot = int(event['slot'])
                 if 0 <= slot < len(self.weapons):
                     self.weapons[slot] = {'kind':event['kind']}
@@ -79,6 +91,12 @@ class Memory:
                 slot = int(event['slot'])
                 if 0 <= slot < len(self.weapons):
                     self.weapons[slot] = None
+            elif event['type'] == 'take_failed' and event.get('reason') == 'gone':
+                self.pickups.pop(event['id'],None)
+            elif event['type'] == 'kill':
+                self.enemies.pop(event['target'],None)
+                if not self.enemies:
+                    self.last_mech = now-3
         self.sounds = [(s,t) for s,t in self.sounds if now-t < 3]
         self.sounds.extend((s,now-s.get('age',0)) for s in obs.get('sounds',[]) if s['kind'] in ('gun','laser','laser_charge','step','lightning'))
         self.sounds = self.sounds[-32:]

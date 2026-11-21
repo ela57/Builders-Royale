@@ -443,6 +443,36 @@ class SimulatorTests(unittest.TestCase):
         obs = self.sim.observe(self.me)
         self.assertEqual(adapter.act(obs),reference.act(obs))
 
+    def test_telemetry_records_real_shots_modes_fights_and_loot(self):
+        self.sim.agents[0].bot.mode = 'engage'
+        self.me.weapons[1] = make_weapon('laser',self.sim.config)
+        self.sim.telemetry.tick(self.sim)
+        self.me.action = {'fire':[True,False]}
+        self.me.weapons[0]['stats']['spread_deg'] = 0
+        self.sim.weapons(self.me)
+        self.sim.advance_projectiles()
+        self.sim.advance_projectiles()
+        self.sim.time = 1
+        self.sim.damage(1,self.me,2000,'laser',self.enemy.pos)
+        self.sim.resolve_deaths()
+        data = self.sim.finish()['telemetry']
+        self.assertEqual(data['shots'],{'gun':1})
+        self.assertEqual(data['hits'],{'gun':1})
+        self.assertEqual(data['first_held'],{'laser':0,'lightning':None})
+        self.assertEqual(data['shooters_at_death'],1)
+        self.assertEqual(data['final_fight_start_hp'],1400)
+        self.assertEqual(data['fights'][0]['outcome'],'lost')
+        self.assertAlmostEqual(data['modes']['engage'],.05)
+
+    def test_telemetry_empty_and_disengaged_episode(self):
+        data = self.sim.finish()['telemetry']
+        self.assertEqual(data['fights'],[])
+        self.assertEqual(data['shots'],{})
+        self.assertIsNone(data['final_fight_start_hp'])
+        self.sim.telemetry.contact(0,self.me)
+        self.sim.telemetry.contact(10,self.me)
+        self.assertEqual(self.sim.telemetry.fights[0]['outcome'],'disengaged')
+
 
 if __name__ == '__main__':
     unittest.main()

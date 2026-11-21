@@ -13,6 +13,7 @@ python3 tools/sim/run.py --matches 24 --seed 1 --jobs 8
 python3 tools/sim/run.py --matches 24 --seed 1 --jobs 8 --bot example
 python3 tools/sim/run.py --matches 1 --seed 1 --mode ffa --ffa-mix mixed
 python3 tools/sim/run.py --matches 1 --seed 1 --duration 2 --jobs 1
+python3 tools/sim/run.py --matches 32 --seed 1 --mode ffa --ffa-mix example --jobs 8 --output results.json
 python3 -m unittest discover -s tools/sim -p 'test_*.py'
 ```
 
@@ -71,3 +72,18 @@ pickups through cover; combat target information still requires shared vision.
 
 Calibrating the example to its known score is a useful scale check but can
 overfit one policy; it does not prove equal difficulty for other strategies.
+
+## Combat telemetry
+
+`--output results.json` retains per-match actual shots, mech/crate hits by weapon,
+first laser/lightning acquisition times, fight episodes and starting HP, recent
+shooters at death, mode seconds and timing samples. The CLI prints aggregate
+hit rates, acquisition rates/times, fight outcomes, final-fight starting HP,
+shooters and mode percentages. `--ffa-mix example` evaluates slot 0 against 15
+unchanged kit examples.
+
+Fights merge engage/dodge and actual dealt/received mech damage within eight
+seconds. Ending contact after a kill counts as won, otherwise disengaged; death
+in an active episode is lost. Recent shooters means unique attackers damaging
+us or firing within 0.2 rad of us, in range, during the final two seconds. This
+is an evaluator-only intent estimate, never information given to the bot.

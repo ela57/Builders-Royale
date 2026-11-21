@@ -6,6 +6,7 @@ import time
 
 from tools.sim.agents import BotAdapter, HouseBot
 from tools.sim.model import Fighter, Zone, angle, cylinder_hit, direction, distance, make_weapon
+from tools.sim.telemetry import Telemetry
 
 
 class Simulator:
@@ -20,6 +21,7 @@ class Simulator:
         self.projectiles,self.cubes,self.pickups,self.crates,self.beams = [],[],[],[],[]
         self.next_id = 30000
         self.timings = []
+        self.telemetry = Telemetry()
         self.last_known = None
         self.last_known_at = -1e9
         self.dead = []
@@ -40,7 +42,7 @@ class Simulator:
                 self.agents[fighter.id] = HouseBot(fighter,tier,geo,random.Random(seed*1009+fighter.id))
         else:
             for fighter in self.fighters[1:]:
-                kind = 'example' if ffa_mix == 'mixed' and fighter.id % 2 else 'ours'
+                kind = 'example' if ffa_mix == 'example' or (ffa_mix == 'mixed' and fighter.id % 2) else 'ours'
                 self.agents[fighter.id] = BotAdapter(kind,self.make_hello(fighter.id),geo)
 
     def make_hello(self, slot):
@@ -364,12 +366,20 @@ class Simulator:
             if target['hp'] <= 0:
                 return
             target['hp'] -= amount
+            if owner == 0:
+                self.telemetry.crate_hits[kind] += 1
             if attacker:
                 attacker.last_combat = self.time
                 attacker.events.append({'type':'hit','target':target['id'],'amount':amount,'weapon':kind})
             return
         if not target.alive or target.hp <= 0:
             return
+        if target.id == 0 and owner is not None:
+            self.telemetry.contact(self.time,target)
+            self.telemetry.aggressors[owner] = self.time
+        if owner == 0:
+            self.telemetry.hits[kind] += 1
+            self.telemetry.contact(self.time,self.fighters[0])
         rear,bearing = False,None
         if source is not None:
             bearing = math.atan2(source[1]-target.pos[1],source[0]-target.pos[0])
@@ -405,6 +415,7 @@ class Simulator:
                     self.projectiles.append({'id':self.new_id(),'owner':me.id,'pos':a,'vel':[v*stats['speed'] for v in ray],
                                              'left':stats['range'],'damage':damage,'source':me.pos[:]})
                     w['ammo'] -= 1
+                    self.telemetry.shot(self,me,'gun')
                     w['cooldown'] = stats['cooldown']+overdue
                     if w['ammo'] == 0:
                         w['reload'] = stats['reload']
@@ -417,6 +428,7 @@ class Simulator:
                     w['charge'] += self.dt
                 release = w['charge'] >= stats['min_charge'] and not held
                 if release or w['charge'] >= stats['charge']+stats['hold_s']:
+                    self.telemetry.shot(self,me,'laser')
                     a,ray = self.muzzle(me)
                     b = [a[i]+ray[i]*stats['range'] for i in range(3)]
                     target,point = self.ray_target(me.id,a,b)
@@ -430,6 +442,7 @@ class Simulator:
                     self.emit_sound(me,'laser')
                     w['charge'],w['cooldown'] = 0.,stats['cooldown']+overdue
             elif kind == 'lightning' and held and w['cooldown'] <= 1e-8 and me.energy >= stats['energy']:
+                self.telemetry.shot(self,me,'lightning')
                 me.energy -= stats['energy']
                 me.last_energy = self.time
                 w['cooldown'] = stats['cooldown']+overdue
@@ -500,6 +513,8 @@ class Simulator:
             if fighter.last_by is not None:
                 killer = self.fighters[fighter.last_by]
                 killer.kills += 1
+                if killer.id == 0 and self.telemetry.active:
+                    self.telemetry.active['kills'] += 1
                 killer.events.append({'type':'kill','target':fighter.id})
             self.add_cubes(fighter.pos,fighter.cubes+self.config['cubes']['death_drop_extra'])
             if self.config['loot']['death_drop']:
@@ -517,6 +532,8 @@ class Simulator:
     def step(self):
         if self.tick % self.config['match']['decide_every'] == 0:
             self.decide()
+        if self.fighters[0].alive:
+            self.telemetry.tick(self)
         zone = self.zone.at(self.time)
         for fighter in self.fighters:
             if fighter.alive:
@@ -546,7 +563,7 @@ class Simulator:
         player = self.fighters[0]
         return {'seed':self.seed,'place':player.place,'score':16-player.place,'cause':player.cause,
                 'kills':player.kills,'cubes':player.cubes,'time_alive':round(player.death_time,2),
-                'timings':self.timings}
+                'timings':self.timings,'telemetry':self.telemetry.result(self)}
 
     def run(self):
         while self.time < self.duration and sum(f.alive for f in self.fighters) > 1 and self.fighters[0].alive:
