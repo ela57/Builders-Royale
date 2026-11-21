@@ -43,6 +43,7 @@ class GeometryTests(unittest.TestCase):
         self.world['prisms'] = [self.prism(holes=[[46,30,54,30,54,70,46,70]])]
         geo = self.make_geo()
         self.assertFalse(geo.is_walkable(geo.cell((39,41))))
+        self.assertTrue(geo.raw_walkable[geo.cell((39,41))[1],geo.cell((39,41))[0]])
         self.assertTrue(geo.is_walkable(geo.cell((51,51))))
         self.assertEqual(geo.solid_top[20,20],20)
         self.world['prisms'] = [self.prism(base=10)]
@@ -104,6 +105,7 @@ class GeometryTests(unittest.TestCase):
         geo.save(cache)
         loaded = self.make_geo(cache)
         np.testing.assert_array_equal(geo.walkable,loaded.walkable)
+        np.testing.assert_array_equal(geo.raw_walkable,loaded.raw_walkable)
         cache.write_bytes(b'not a cache')
         np.testing.assert_array_equal(geo.walkable,self.make_geo(cache).walkable)
         geo.save(cache)
@@ -116,7 +118,7 @@ class GeometryTests(unittest.TestCase):
         move = nav.move([15,15,0],[85,85],0)
         self.assertGreater(sum(v*v for v in move),0)
         self.assertLessEqual(sum(v*v for v in move),1.000001)
-        self.assertEqual(nav.move([-10,-10,0],[85,85],.1),[0,0])
+        self.assertGreater(sum(v*v for v in nav.move([-10,-10,0],[85,85],.1)),0)
 
     def test_bot_follows_path_around_wall(self):
         self.world['prisms'] = [self.prism()]
@@ -146,7 +148,9 @@ class GeometryTests(unittest.TestCase):
         self.world['prisms'] = [self.prism(), {'base':0,'top':20,'ring':[10,20,60,20,60,30,10,30]}]
         geo = self.make_geo()
         nav = Navigator(geo)
-        nav.move([31,51,0],[85,51],0,budget_ms=0)
+        move = nav.move([31,51,0],[85,51],0,budget_ms=0)
+        self.assertGreater(sum(v*v for v in move),0)
+        self.assertLessEqual(sum(v*v for v in move),1.000001)
         search = nav.search
         self.assertEqual(nav.path,[])
         nav.move([31,51,0],[85,51],2,budget_ms=0)

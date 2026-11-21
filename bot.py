@@ -34,6 +34,32 @@ class Bot:
         self.stuck_since = None
         self.last_move = [0,0]
         self.regenerating = False
+        self.explored = set()
+        self.explore_goal = None
+        self.explore_at = 0
+
+    def _explore(self, pos, circle, now):
+        self.explored.add((int(pos[0]//30),int(pos[1]//30)))
+        if self.explore_goal is not None and now < self.explore_at and math.dist(pos[:2],self.explore_goal) > 8 and math.dist(self.explore_goal,circle['center']) < circle['radius']-5:
+            return self.explore_goal
+        candidates = []
+        for _ in range(24):
+            yaw = self.rng.uniform(-math.pi,math.pi)
+            radius = self.rng.uniform(40,100)
+            point = [pos[0]+math.cos(yaw)*radius,pos[1]+math.sin(yaw)*radius]
+            if math.dist(point,circle['center']) > circle['radius']-8:
+                continue
+            cell = self.geo.nearest(point,radius=3)
+            if cell is None:
+                continue
+            point = self.geo.point(cell)
+            if math.dist(point,circle['center']) > circle['radius']-5:
+                continue
+            key = (int(point[0]//30),int(point[1]//30))
+            candidates.append((key not in self.explored,self.rng.random(),point))
+        self.explore_goal = max(candidates)[2] if candidates else circle['center']
+        self.explore_at = now+12
+        return self.explore_goal
 
     def _cover(self, me, threats, circle, now, deadline):
         key = tuple((t['id'],int(t['pos'][0]/8),int(t['pos'][1]/8)) for t in threats)
@@ -154,9 +180,12 @@ class Bot:
                             if math.dist(pos[:2],goal) < max(1,drop.get('radius',8)-3):
                                 move = [0,0]
                 if goal is None and move is None and target is None:
-                    self.mode = 'hide'
-                    goal = self._cover(me,[],circle,now,deadline) or safe
-                    speed = .4
+                    if now < 150 and not any(w and w['kind'] != 'gun' for w in me.get('weapons',[])):
+                        self.mode,goal = 'explore',self._explore(pos,circle,now)
+                    else:
+                        self.mode = 'hide'
+                        goal = self._cover(me,[],circle,now,deadline) or safe
+                        speed = .4
             else:
                 self.mode = 'hide'
                 move = [0,0]
@@ -169,9 +198,6 @@ class Bot:
             action['boost'] = me.get('energy',0) > 0
             self.mode = 'dodge'
         move = self._avoid_npcs(pos,move,target)
-        look = [pos[0]+move[0]*3,pos[1]+move[1]*3]
-        if any(move) and not self.geo.walk_clear(pos,look):
-            move = [0,0]
         actors = obs.get('mechs',[])+[{**c,'kind':'crate'} for c in obs.get('crates',[])]
         if time.perf_counter() < deadline-.003:
             aim,fire,reload = fire_control(me,target,target is not None and target['id'] in visible_ids,actors,self.geo,self.config,deadline-.001)

@@ -45,6 +45,7 @@ class Geo:
                     self.ground_grid = data['ground']
                     self.solid_top = data['solid_top']
                     self.walkable = data['walkable']
+                    self.raw_walkable = data['raw_walkable'] if 'raw_walkable' in data else self.walkable.copy()
                     if 'components' in data:
                         self.components = data['components']
                     if self.walkable.shape != (self.height, self.width):
@@ -121,9 +122,10 @@ class Geo:
                 if math.hypot(dx*2,dy*2) <= 2.5+math.sqrt(2):
                     dilated |= padded[2+dy:2+dy+self.height,2+dx:2+dx+self.width]
         self.walkable = ~dilated
+        self.raw_walkable = ~blocked
 
     def save(self, path):
-        np.savez_compressed(path, signature=self.signature, origin=self.origin, ground=self.ground_grid, solid_top=self.solid_top, walkable=self.walkable, components=self.components)
+        np.savez_compressed(path, signature=self.signature, origin=self.origin, ground=self.ground_grid, solid_top=self.solid_top, walkable=self.walkable, components=self.components, raw_walkable=self.raw_walkable)
 
     def cell(self, point):
         return (math.floor((point[0]-self.origin[0])/2), math.floor((point[1]-self.origin[1])/2))

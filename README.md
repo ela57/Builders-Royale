@@ -53,8 +53,9 @@ only a complete route (or `[]`); the bot uses resumable searches instead.
 Cover returns a safe hidden point or `None`; it prefers proximity and walls,
 using the next circle if supplied. A* and cover have cooperative time budgets.
 `navigation.py` reuses the last complete safe path while a new one is pending;
-without a previous path it waits, rather than following a partial route into a
-concave pocket. The benchmark checks 20 connected random 100–700 m routes,
+without a previous path it moves directly toward the goal, allowing physical
+wall sliding while the complete route is pending. No partial route is published.
+The benchmark checks 20 connected random 100–700 m routes,
 reports total latency and individual 6 ms work slices separately, and validates
 all segments against blocked cells. Disconnected samples are reported separately.
 
@@ -66,5 +67,23 @@ and weapon charge are authoritative; no mech shots are issued through blocked
 LOS or at remembered-only targets. Trigger false releases a charging laser;
 losing LOS therefore cancels the hold but cannot prevent a shot already charged
 from discharging into intervening cover. Exact bridge raycasting, larger-mech
-navigation after cubes, and a real match performance evaluation remain outside
-this geometry model.
+navigation after cubes, and real-match fidelity remain outside this geometry model.
+
+## Local tuning
+
+`tools/sim/` imports the actual bot and the unchanged kit example class in-process
+for approximate 20 Hz practice-squad or FFA matches. It reads game numbers from
+the recorded hello, supports eight worker processes, and reports placement,
+death causes, kills, cubes, survival time and act timings. See
+[`tools/sim/README.md`](tools/sim/README.md) for modeled rules and limitations.
+The simulator is excluded from the Docker context.
+
+```sh
+python3 tools/sim/run.py --matches 24 --seed 1 --jobs 8
+python3 tools/sim/run.py --matches 24 --seed 1 --jobs 8 --bot example
+python3 -m unittest discover -s tools/sim -p 'test_*.py'
+```
+
+Before 150 s, a gun-only pilot with no visible safe loot explores nearby open
+areas inside the safe circle instead of standing still. Navigation fallback and
+combat movement are not zeroed simply because a straight segment touches a wall.

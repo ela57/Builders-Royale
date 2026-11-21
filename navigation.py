@@ -37,7 +37,10 @@ class Navigator:
                 self.path = self.path[i:]
                 break
         if not self.path or not self.geo.walk_clear(pos,self.path[0]):
-            return [0,0]
+            dx,dy = goal[0]-pos[0],goal[1]-pos[1]
+            distance = math.hypot(dx,dy)
+            scale = min(speed,distance/2)/max(distance,1e-9)
+            return [dx*scale,dy*scale]
         dx,dy = self.path[0][0]-pos[0],self.path[0][1]-pos[1]
         distance = math.hypot(dx,dy)
         scale = min(speed,distance/2)/max(distance,1e-9)

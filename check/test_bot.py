@@ -25,6 +25,12 @@ class OpenGeo:
     def ground(self, x, y):
         return 0
 
+    def nearest(self, point, radius=3):
+        return tuple(point[:2])
+
+    def point(self, cell):
+        return cell
+
     def find_cover(self, *args, **kwargs):
         return self.cover
 
@@ -256,6 +262,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(self.bot.mode,'drop')
 
     def test_idle_sound_scan_and_stuck_recovery(self):
+        self.obs['self']['weapons'][1] = weapon('laser')
         action = self.bot.act(self.obs)
         self.assertEqual(self.bot.mode,'hide')
         self.assertLessEqual(math.hypot(*action['move']),.4)
@@ -284,6 +291,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(self.bot._avoid_npcs([0,0,0],[.4,0],self.bot.memory.npcs[100]),[.4,0])
 
     def test_cover_cache_invalidates_when_new_threat_arrives(self):
+        self.obs['self']['weapons'][1] = weapon('laser')
         calls = []
         def cover(*args, **kwargs):
             calls.append(args[1])
@@ -295,6 +303,18 @@ class BotTests(unittest.TestCase):
         self.bot.act(self.obs)
         self.assertEqual(len(calls),2)
         self.assertEqual(len(calls[-1]),2)
+
+    def test_early_exploration_and_no_wall_freeze(self):
+        action = self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'explore')
+        self.assertGreater(math.hypot(*action['move']),0)
+        self.assertLess(math.dist(self.bot.explore_goal,[0,0]),500)
+        self.geo.walk_clear = lambda a,b:False
+        self.obs['mechs'] = [enemy()]
+        self.assertGreater(math.hypot(*self.bot.act(self.obs)['move']),0)
+        self.obs.update(t=151,mechs=[])
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'hide')
 
 
 if __name__ == '__main__':
