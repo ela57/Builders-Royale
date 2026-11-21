@@ -37,6 +37,32 @@ class Bot:
         self.explored = set()
         self.explore_goal = None
         self.explore_at = 0
+        self.nav_cell = None
+        self.nav_label = None
+
+    def _reachable(self, point):
+        if self.nav_label is None:
+            return True
+        cell = self.geo.nearest(point,radius=3)
+        return cell is not None and self.geo.components[cell[1],cell[0]] == self.nav_label
+
+    def _zone_goal(self, point, circle):
+        if self._reachable(point):
+            return point
+        for radius in (12,24,48,80):
+            candidates = []
+            for i in range(12):
+                yaw = i*math.pi/6
+                trial = [point[0]+math.cos(yaw)*radius,point[1]+math.sin(yaw)*radius]
+                if math.dist(trial,circle['center'])+3 > circle['radius'] or not self._reachable(trial):
+                    continue
+                cell = self.geo.nearest(trial,radius=3)
+                trial = self.geo.point(cell)
+                if math.dist(trial,circle['center'])+3 <= circle['radius']:
+                    candidates.append(trial)
+            if candidates:
+                return min(candidates,key=lambda p:math.dist(p,point))
+        return point
 
     def _explore(self, pos, circle, now):
         self.explored.add((int(pos[0]//30),int(pos[1]//30)))
@@ -53,7 +79,7 @@ class Bot:
             if cell is None:
                 continue
             point = self.geo.point(cell)
-            if math.dist(point,circle['center']) > circle['radius']-5:
+            if math.dist(point,circle['center']) > circle['radius']-5 or not self._reachable(point):
                 continue
             key = (int(point[0]//30),int(point[1]//30))
             candidates.append((key not in self.explored,self.rng.random(),point))
@@ -88,6 +114,8 @@ class Bot:
             distance = math.dist(me['pos'][:2],point[:2])
             if distance > (140 if weapons_only else 100) or not self._detour_safe(point,me,zone,now):
                 continue
+            if not self._reachable(point):
+                continue
             if abs(point[2]-me['pos'][2]) > 4 and point[2]-float(self.geo.ground(*point[:2])) > 3:
                 continue
             if any(math.dist(point[:2],enemy['pos'][:2]) < 90 for enemy in self.memory.enemies.values()):
@@ -117,6 +145,9 @@ class Bot:
         deadline = time.perf_counter()+.025
         me,now,zone = obs['self'],obs['t'],obs['zone']
         pos = me['pos']
+        if hasattr(self.geo,'components'):
+            self.nav_cell = self.geo.nearest(pos)
+            self.nav_label = self.geo.components[self.nav_cell[1],self.nav_cell[0]] if self.nav_cell is not None else None
         self.memory.update(obs)
         action = {'move':[0,0],'fire':[False,False],'boost':False}
         pick = pick_offer(obs.get('offer'))
@@ -139,7 +170,7 @@ class Bot:
         goal,move,speed = None,None,1
         equipment = self._loot_goal(me,zone,now,weapons_only=True) if now < 150 and not any(w and w['kind'] in DESIRED for w in me.get('weapons',[])) else None
         if urgent:
-            self.mode,goal = 'zone',safe
+            self.mode,goal = 'zone',self._zone_goal(safe,circle)
             action['boost'] = me.get('energy',0) > 20
         elif equipment is not None and hp_ratio > .7 and all(math.dist(pos[:2],enemy['pos'][:2]) > 100 for enemy in threats):
             self.mode,goal = 'equip',equipment
@@ -213,6 +244,9 @@ class Bot:
                 move = [0,0]
         if goal is not None and move is None and time.perf_counter() < deadline-.007:
             move = self.nav.move(pos,goal,now,budget_ms=min(8,(deadline-time.perf_counter())*1000-6),speed=speed)
+            if self.nav_cell is not None and not self.geo.is_walkable(self.geo.cell(pos)):
+                point = self.geo.point(self.nav_cell)
+                move = unit(point[0]-pos[0],point[1]-pos[1])
         move = move or [0,0]
         evasion = dodge(me,visible_mechs,obs.get('projectiles',[]),self.geo,self.config,deadline-.004)
         if evasion is not None:

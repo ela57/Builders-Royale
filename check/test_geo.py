@@ -10,6 +10,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from geo import Geo
 from navigation import Navigator
+from bot import Bot
 
 
 class GeometryTests(unittest.TestCase):
@@ -160,6 +161,29 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(search.status,'complete')
         for a,b in zip(search.path,search.path[1:]):
             self.assertTrue(geo.walk_clear(a,b))
+
+    def test_bot_backs_out_of_dilated_margin_before_following_route(self):
+        self.world['prisms'] = [self.prism()]
+        geo = self.make_geo()
+        bot = Bot({'seed':1},geo=geo)
+        obs = {'t':0,'self':{'id':0,'pos':[39,51,0],'vel':[0,0,0],
+               'hp':1400,'max_hp':1400,'energy':100,'weapons':[], 'in_zone':True},
+               'zone':{'center':[50,50],'radius':100,'next_center':[85,51],
+                       'next_radius':20,'shrink_start':0,'shrink_end':50}}
+        move = bot.act(obs)['move']
+        self.assertLess(move[0],0)
+        self.assertTrue(bot._reachable([85,51]))
+
+    def test_zone_goal_avoids_disconnected_courtyard(self):
+        self.world['prisms'] = [self.prism(holes=[[46,30,54,30,54,70,46,70]])]
+        geo = self.make_geo()
+        bot = Bot({'seed':1},geo=geo)
+        bot.nav_cell = geo.cell([85,51])
+        bot.nav_label = geo.components[bot.nav_cell[1],bot.nav_cell[0]]
+        self.assertFalse(bot._reachable([51,51]))
+        goal = bot._zone_goal([51,51],{'center':[51,51],'radius':60})
+        self.assertTrue(bot._reachable(goal))
+        self.assertLess(sum((goal[i]-51)**2 for i in (0,1)),60**2)
 
 
 if __name__ == '__main__':

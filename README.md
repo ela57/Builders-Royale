@@ -91,3 +91,7 @@ Pickups/crates are remembered for 90 s and cubes for 20 s, with stale nearby
 items and confirmed kills removed. Early gun-only pilots take safe remembered
 weapon detours even while watching a distant enemy, rather than forgetting loot
 as soon as it leaves the view wedge.
+When collision/inertia leaves a pilot outside the conservative planning grid,
+it first backs out to a valid cell rather than pushing toward an unreachable
+waypoint. Exploration/loot goals stay in its connected component, and zone
+aim points in enclosed courtyards are replaced by nearby reachable safe points.
