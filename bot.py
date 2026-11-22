@@ -106,12 +106,13 @@ class Bot:
         travel = (math.dist(me['pos'][:2],point[:2])+max(0,math.dist(point[:2],zone['next_center'])-.6*zone['next_radius']))/max(1,me.get('stats',{}).get('walk_speed',11.7))
         return now+travel+10 < zone['shrink_start'] or math.dist(point[:2],zone['next_center'])+3 <= .6*zone['next_radius']
 
-    def _loot_goal(self, me, zone, now, weapons_only=False):
+    def _loot_goal(self, me, zone, now, weapons_only=False, cubes_only=False):
         held = {w['kind'] for w in me.get('weapons',[]) if w}
         candidates = []
-        items = [(p,.65 if p['kind'] == 'laser' else .85) for p in self.memory.pickups.values() if p['kind'] in DESIRED-held]
+        items = [] if cubes_only else [(p,.65 if p['kind'] == 'laser' else .85) for p in self.memory.pickups.values() if p['kind'] in DESIRED-held]
         if not weapons_only:
             items += [(p,1.2 if not held & DESIRED else .8) for p in self.memory.cubes.values()]
+            items += [(p,1.) for p in self.memory.harvests.values()]
         for item,weight in items:
             point = item['pos']
             distance = math.dist(me['pos'][:2],point[:2])
@@ -172,9 +173,12 @@ class Bot:
             self.regenerating = False
         goal,move,speed = None,None,1
         equipment = self._loot_goal(me,zone,now,weapons_only=True) if now < 150 and not any(w and w['kind'] in DESIRED for w in me.get('weapons',[])) else None
+        cubes = self._loot_goal(me,zone,now,cubes_only=True) if hp_ratio > .6 and not self.regenerating and all(math.dist(pos[:2],enemy['pos'][:2]) > 100 for enemy in threats) else None
         if urgent:
             self.mode,goal = 'zone',self._zone_goal(safe,circle)
             action['boost'] = me.get('energy',0) > 20
+        elif cubes is not None:
+            self.mode,goal,target = 'loot',cubes,None
         elif equipment is not None and hp_ratio > .7 and all(math.dist(pos[:2],enemy['pos'][:2]) > 100 for enemy in threats):
             self.mode,goal = 'equip',equipment
         elif threats and (not engage or self.regenerating):
@@ -215,17 +219,21 @@ class Bot:
                     self.mode,goal = 'loot',loot
                 else:
                     muzzle = [pos[0],pos[1],pos[2]+me.get('stats',{}).get('muzzle_height',7)]
-                    crates = sorted(obs.get('crates',[]),key=lambda c:math.dist(pos[:2],c['pos'][:2]))
-                    for crate in crates:
+                    harvest = [(c,'crate') for c in obs.get('crates',[])]
+                    harvest += [(n,'npc') for n in obs.get('mechs',[]) if n.get('kind') == 'npc' and hp_ratio > .6]
+                    harvest.sort(key=lambda pair:math.dist(pos[:2],pair[0]['pos'][:2]))
+                    for crate,kind in harvest:
                         if time.perf_counter() >= deadline-.012:
                             break
-                        if math.dist(pos[:2],crate['pos'][:2]) < 60 and self._detour_safe(crate['pos'],me,zone,now) and self.geo.los(muzzle,[crate['pos'][0],crate['pos'][1],crate['pos'][2]+1.2]):
-                            target = {**crate,'kind':'crate'}
-                            self.mode,move = 'crate',[0,0]
+                        if math.dist(pos[:2],crate['pos'][:2]) < 60 and self._reachable(crate['pos']) and abs(crate['pos'][2]-float(self.geo.ground(*crate['pos'][:2]))) < 4 and self._detour_safe(crate['pos'],me,zone,now) and self.geo.los(muzzle,[crate['pos'][0],crate['pos'][1],crate['pos'][2]+1.2]):
+                            target = {**crate,'kind':kind}
+                            self.mode,goal = kind,crate['pos'][:2]
+                            if math.dist(pos[:2],goal) < 12:
+                                move = [0,0]
                             visible_ids.add(crate['id'])
                             break
                     if target is None:
-                        remembered = [c for c in self.memory.crates.values() if math.dist(pos[:2],c['pos'][:2]) < 100 and self._detour_safe(c['pos'],me,zone,now)]
+                        remembered = [c for c in self.memory.crates.values() if math.dist(pos[:2],c['pos'][:2]) < 100 and self._reachable(c['pos']) and abs(c['pos'][2]-float(self.geo.ground(*c['pos'][:2]))) < 4 and self._detour_safe(c['pos'],me,zone,now)]
                         if remembered:
                             self.mode,goal = 'loot',min(remembered,key=lambda c:math.dist(pos[:2],c['pos'][:2]))['pos'][:2]
                     if target is None and now-self.memory.last_mech >= 10:

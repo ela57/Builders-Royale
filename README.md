@@ -92,10 +92,15 @@ python3 -m unittest discover -s tools/sim -p 'test_*.py'
 Before 150 s, a gun-only pilot with no visible safe loot explores nearby open
 areas inside the safe circle instead of standing still. Navigation fallback and
 combat movement are not zeroed simply because a straight segment touches a wall.
-Pickups/crates are remembered for 90 s and cubes for 20 s, with stale nearby
+Pickups/crates/cubes are remembered for 90 s, with stale nearby
 items and confirmed kills removed. Early gun-only pilots take safe remembered
 weapon detours even while watching a distant enemy, rather than forgetting loot
 as soon as it leaves the view wedge.
+Safe cube routes take priority over equipment detours and distant enemies.
+Confirmed mech/drone kills and hits on disappearing crates leave short-lived
+harvest sites, so drops can be approached before entering the view wedge.
+With no nearby mech threat, ground-level crates and drones are approached while
+firing; dead drones are removed from avoidance memory immediately.
 When collision/inertia leaves a pilot outside the conservative planning grid,
 it first backs out to a valid cell rather than pushing toward an unreachable
 waypoint. Exploration/loot goals stay in its connected component, and zone

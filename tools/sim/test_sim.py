@@ -343,6 +343,24 @@ class SimulatorTests(unittest.TestCase):
         self.assertEqual(self.me.kills,1)
         self.assertEqual(self.me.events[-1],{'type':'kill','target':1})
 
+    def test_carried_cubes_drop_with_two_extra_and_tie_goes_to_lower_id(self):
+        self.enemy.cubes = 4
+        self.sim.damage(0,self.enemy,10000,'gun',self.me.pos)
+        self.sim.resolve_deaths()
+        self.assertEqual(len(self.sim.cubes),6)
+        self.assertTrue(all(c['pos'] == self.enemy.pos for c in self.sim.cubes))
+        self.sim.cubes = []
+        self.enemy.alive,self.enemy.hp = True,1400
+        self.me.pos,self.enemy.pos = [10,10,0],[12,10,0]
+        self.sim.add_cubes([11,10,0],1)
+        self.sim.collect(self.enemy)
+        self.assertEqual(self.enemy.cubes,4)
+        self.sim.collect(self.me)
+        self.assertEqual(self.me.cubes,1)
+        self.assertEqual(self.sim.cubes,[])
+        self.sim.collect(self.me)
+        self.assertEqual(self.me.cubes,1)
+
     def test_closest_cube_collector_and_vertical_reach(self):
         self.enemy.pos = [12,10,0]
         self.sim.add_cubes([11.5,10,0],1)

@@ -321,6 +321,78 @@ class BotTests(unittest.TestCase):
         self.bot.act(self.obs)
         self.assertNotEqual(self.bot.mode,'equip')
 
+    def test_kill_site_survives_missing_cubes_and_dead_drone_avoidance(self):
+        self.obs['mechs'] = [enemy(55,id=100,kind='npc')]
+        self.bot.memory.update(self.obs)
+        self.obs.update(t=1,mechs=[],events=[{'type':'kill','target':100}])
+        action = self.bot.act(self.obs)
+        self.assertNotIn(100,self.bot.memory.npcs)
+        self.assertEqual(self.bot.mode,'loot')
+        self.assertEqual(self.bot.nav.goal,(55,0))
+        self.assertGreater(action['move'][0],0)
+        self.obs.update(t=25,events=[])
+        self.bot.act(self.obs)
+        self.assertIn(100,self.bot.memory.harvests)
+        self.obs['self']['pos'] = [54,0,0]
+        self.bot.act(self.obs)
+        self.assertNotIn(100,self.bot.memory.harvests)
+
+    def test_cubes_precede_weapon_detours_but_not_nearby_threats_or_zone(self):
+        self.obs['cubes'] = [{'id':5000,'pos':[20,0,0]}]
+        self.obs['pickups'] = [{'id':8000,'kind':'laser','pos':[60,0,0]}]
+        self.obs['mechs'] = [enemy(190)]
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'loot')
+        self.assertEqual(self.bot.nav.goal,(20,0))
+        self.obs['mechs'] = [enemy(70)]
+        self.bot.act(self.obs)
+        self.assertNotEqual(self.bot.mode,'loot')
+        self.obs['self']['pos'] = [490,0,0]
+        self.obs['cubes'][0]['pos'] = [470,0,0]
+        self.obs['mechs'] = []
+        self.obs['t'] = 99
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'zone')
+
+    def test_cube_memory_outlasts_detour_and_only_clears_at_collection_distance(self):
+        self.obs['cubes'] = [{'id':5000,'pos':[30,0,0]}]
+        self.bot.memory.update(self.obs)
+        self.obs.update(t=25,cubes=[])
+        self.obs['self']['pos'] = [26,0,0]
+        self.bot.memory.update(self.obs)
+        self.assertIn(5000,self.bot.memory.cubes)
+        self.obs['self']['pos'] = [29,0,0]
+        self.bot.memory.update(self.obs)
+        self.assertNotIn(5000,self.bot.memory.cubes)
+        self.bot.memory.harvests[1] = {'id':1,'pos':[40,0,0],'seen':0}
+        self.obs.update(t=91,events=[{'type':'kill','target':999}])
+        self.bot.memory.update(self.obs)
+        self.assertEqual(self.bot.memory.harvests,{})
+
+    def test_safe_farming_approaches_crates_and_drones_but_rejects_roofs(self):
+        self.obs['crates'] = [{'id':1000,'pos':[40,0,0],'hp':300}]
+        action = self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'crate')
+        self.assertGreater(action['move'][0],0)
+        self.obs.update(t=.1,events=[{'type':'hit','target':1000,'amount':45}])
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.memory.harvests,{})
+        self.obs.update(t=.2,crates=[])
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'loot')
+        self.assertIn(1000,self.bot.memory.harvests)
+        self.bot.memory.harvests.clear()
+        self.bot.memory.crates.clear()
+        self.obs.update(t=1,events=[],mechs=[enemy(50,id=100,kind='npc')])
+        action = self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'npc')
+        self.assertGreater(action['move'][0],0)
+        self.obs.update(t=7,mechs=[],crates=[{'id':1001,'pos':[40,0,30],'hp':300}])
+        self.bot.act(self.obs)
+        self.assertNotEqual(self.bot.mode,'crate')
+        self.assertNotEqual(self.bot.nav.goal,(40,0))
+        self.assertEqual(self.bot.memory.npcs,{})
+
     def test_empty_observation_and_time_guards(self):
         action = self.bot.act(self.obs)
         self.assertEqual(action['fire'],[False,False])

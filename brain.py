@@ -57,17 +57,18 @@ class Memory:
         self.pickups = {}
         self.crates = {}
         self.cubes = {}
+        self.harvests = {}
 
     def update(self, obs):
         now = obs['t']
         self.weapons = list(obs['self'].get('weapons',[None,None]))
-        for name,ttl in (('pickups',90),('crates',90),('cubes',20)):
+        for name,ttl in (('pickups',90),('crates',90),('cubes',90)):
             records = getattr(self,name)
             visible = {item['id'] for item in obs.get(name,[])}
             for item in obs.get(name,[]):
                 records[item['id']] = {**item,'seen':now}
             records = {i:item for i,item in records.items() if now-item['seen'] < ttl and
-                       (i in visible or math.dist(obs['self']['pos'][:2],item['pos'][:2]) > 5)}
+                       (i in visible or math.dist(obs['self']['pos'][:2],item['pos'][:2]) > (2 if name == 'cubes' else 5))}
             setattr(self,name,records)
         for actor in obs.get('mechs',[]):
             record = {**actor,'seen':now}
@@ -77,7 +78,7 @@ class Memory:
             else:
                 self.npcs[actor['id']] = record
         self.enemies = {i:e for i,e in self.enemies.items() if now-e['seen'] < 5}
-        self.npcs = {i:e for i,e in self.npcs.items() if now-e['seen'] < 30}
+        self.npcs = {i:e for i,e in self.npcs.items() if now-e['seen'] < 5}
         for event in obs.get('events',[]):
             if event['type'] == 'damaged':
                 self.last_damage,self.attacker = now,event.get('by')
@@ -94,9 +95,16 @@ class Memory:
             elif event['type'] == 'take_failed' and event.get('reason') == 'gone':
                 self.pickups.pop(event['id'],None)
             elif event['type'] == 'kill':
-                self.enemies.pop(event['target'],None)
+                victim = self.enemies.pop(event['target'],None) or self.npcs.pop(event['target'],None)
+                if victim is not None:
+                    self.harvests[event['target']] = {'id':event['target'],'pos':victim['pos'][:],'seen':now}
                 if not self.enemies:
                     self.last_mech = now-3
+            elif event['type'] == 'hit' and event.get('target') in self.crates and event['target'] not in {c['id'] for c in obs.get('crates',[])}:
+                crate = self.crates[event['target']]
+                self.harvests[crate['id']] = {'id':crate['id'],'pos':crate['pos'][:],'seen':now}
+        self.harvests = {i:site for i,site in self.harvests.items() if now-site['seen'] < 90 and
+                         math.dist(obs['self']['pos'][:2],site['pos'][:2]) > 2}
         self.sounds = [(s,t) for s,t in self.sounds if now-t < 3]
         self.sounds.extend((s,now-s.get('age',0)) for s in obs.get('sounds',[]) if s['kind'] in ('gun','laser','laser_charge','step','lightning'))
         self.sounds = self.sounds[-32:]
