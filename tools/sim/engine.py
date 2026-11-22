@@ -178,7 +178,7 @@ class Simulator:
                 elapsed = (time.perf_counter()-start)*1000
                 if fighter.id == 0:
                     self.timings.append(elapsed)
-                    if elapsed >= 30:
+                    if elapsed >= 15:
                         gc_after = collections()
                         self.slow_decisions.append({'tick':self.tick,'wall_ms':elapsed,
                             'cpu_ms':(time.process_time()-cpu_start)*1000,

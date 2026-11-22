@@ -94,7 +94,7 @@ def main():
     final_hp = [r['telemetry']['final_fight_start_hp'] for r in results if r['telemetry']['final_fight_start_hp'] is not None]
     print(f'Final fight starting HP mean={statistics.mean(final_hp):.1f}' if final_hp else 'No final fights')
     slow = [{'seed':r['seed'],**decision} for r in results for decision in r['slow_decisions']]
-    print(f'Slow decisions (>=30 ms): {len(slow)}; '+json.dumps(slow[:20]))
+    print(f'Slow decisions (>=15 ms): {len(slow)}; '+json.dumps(slow[:20]))
     print(f"Our supply-drop captures: {sum(r['world']['drop_captures'].get(0,0) for r in results)}; NPC kills: {sum(r['world']['npc_kills'].get(0,0) for r in results)}")
     npc_hits = Counter()
     for result in results:
