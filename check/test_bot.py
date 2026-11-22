@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from bot import Bot
@@ -72,6 +73,22 @@ class BotTests(unittest.TestCase):
         self.geo = OpenGeo()
         self.bot = Bot({'seed':7},geo=self.geo)
         self.obs = observation()
+
+    def test_startup_collects_then_freezes_loaded_geometry_without_disabling_gc(self):
+        for injected in (False,True):
+            with self.subTest(injected=injected):
+                calls = []
+                def load(*args):
+                    calls.append('load')
+                    return self.geo
+                with patch('bot.Geo',side_effect=load), \
+                     patch('bot.gc.collect',side_effect=lambda:calls.append('collect')), \
+                     patch('bot.gc.freeze',side_effect=lambda:calls.append('freeze')), \
+                     patch('bot.gc.disable') as disable:
+                    bot = Bot({'seed':7},geo=self.geo if injected else None)
+                self.assertIs(bot.geo,self.geo)
+                self.assertEqual(calls,(['load'] if not injected else [])+['collect','freeze'])
+                disable.assert_not_called()
 
     def aligned(self, target):
         self.obs['self']['aim'] = aim_at([0,0,7],centre(target))

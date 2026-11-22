@@ -1,4 +1,5 @@
 """Bounded navigation, independent legs/torso and survival priorities."""
+import gc
 import math
 from pathlib import Path
 import random
@@ -20,6 +21,8 @@ class Bot:
         if not (map_dir / 'v2/world.json').is_file():
             map_dir = root / 'arena'
         self.geo = geo if geo is not None else Geo(map_dir,root / 'navgrid.npz')
+        gc.collect()
+        gc.freeze()
         self.config = hello.get('config',{})
         self.rng = random.Random(hello.get('seed',0))
         self.nav = Navigator(self.geo)

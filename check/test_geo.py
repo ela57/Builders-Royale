@@ -1,9 +1,11 @@
 """Small deterministic maps exercise geometry without the practice recording."""
 import json
+import gc
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+import weakref
 
 import numpy as np
 
@@ -85,6 +87,37 @@ class GeometryTests(unittest.TestCase):
         geo = self.make_geo()
         geo._walk[11][10] = False
         self.assertFalse(geo.walk_clear(geo.point((10,10)),geo.point((11,11))))
+
+    def test_abandoned_search_releases_its_generator_without_collection(self):
+        self.world['prisms'] = [self.prism()]
+        geo = self.make_geo()
+        nav = Navigator(geo)
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            nav.move((15,51),(85,51),0,budget_ms=.01)
+            self.assertIsNotNone(nav.search)
+            old = weakref.ref(nav.search)
+            nav.invalidate()
+            self.assertIsNone(old())
+            nav.move((15,51),(85,51),1,budget_ms=.01)
+            old = weakref.ref(nav.search)
+            nav.move((15,51),(85,85),1.1,budget_ms=0)
+            self.assertIsNone(old())
+            nav.invalidate()
+            search = geo.search((15,51),(85,51))
+            search.close()
+            search.close()
+            self.assertEqual(search.advance(1),'unreachable')
+            self.assertEqual(search.path,[])
+            search = geo.search((15,51),(85,51))
+            search.advance(.01)
+            old = weakref.ref(search)
+            del search
+            self.assertIsNone(old())
+        finally:
+            if enabled:
+                gc.enable()
 
     def test_los_cover_empty_and_no_cover(self):
         self.world['prisms'] = [self.prism()]

@@ -227,8 +227,12 @@ class PathSearch:
         self.geo = geo
         self.status = 'pending'
         self.path = []
-        self.expansions = 0
-        self._work = self._run(start, goal)
+        self._expansions = [0]
+        self._work = self._run(geo,start,goal,self._expansions)
+
+    @property
+    def expansions(self):
+        return self._expansions[0]
 
     def advance(self, budget_ms=8):
         deadline = time.perf_counter()+budget_ms/1000
@@ -240,8 +244,13 @@ class PathSearch:
                 self.status = 'complete' if self.path else 'unreachable'
         return self.status
 
-    def _run(self, start, goal):
-        geo = self.geo
+    def close(self):
+        self._work.close()
+        self.path = []
+        self.status = 'unreachable'
+
+    @staticmethod
+    def _run(geo, start, goal, expansions):
         source, target = geo.nearest(start), geo.nearest(goal)
         if source is None or target is None:
             return []
@@ -251,14 +260,14 @@ class PathSearch:
         queue = [(h(source),0,source)]
         costs, parents = {source:0}, {}
         while queue:
-            if self.expansions % 32 == 0:
+            if expansions[0] % 32 == 0:
                 yield
             _,cost,current = heapq.heappop(queue)
             if cost != costs[current]:
                 # Stale heap entries must also yield under the budget.
                 yield
                 continue
-            self.expansions += 1
+            expansions[0] += 1
             if current == target:
                 break
             x,y = current

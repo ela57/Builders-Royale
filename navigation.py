@@ -11,6 +11,8 @@ class Navigator:
         self.replan_at = -math.inf
 
     def invalidate(self):
+        if self.search is not None:
+            self.search.close()
         self.path = []
         self.search = None
         self.replan_at = -math.inf
@@ -18,6 +20,8 @@ class Navigator:
     def move(self, pos, goal, now, budget_ms=8, speed=1):
         changed = self.goal is None or math.dist(goal[:2],self.goal) > 10
         if changed or (self.search is None and now >= self.replan_at):
+            if self.search is not None:
+                self.search.close()
             self.search = self.geo.search(pos,goal)
             self.goal = tuple(goal[:2])
         if self.search is not None:

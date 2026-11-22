@@ -45,6 +45,11 @@ only complete paths are published in `.path`. A* retains its frontier across
 ticks, even after the normal replan interval. Flood-filled connectivity labels
 reject disconnected endpoints immediately. Smoothing uses supercover traversal
 with exponential lookahead, also yielding to the per-tick budget.
+Pending searches do not retain their owners through generator cycles. `close()`
+releases a search immediately; navigation closes superseded or invalidated work
+instead of leaving large frontiers for a later garbage-collection pause.
+Startup collects garbage and freezes the long-lived geometry after loading;
+automatic garbage collection remains enabled for new runtime objects.
 `astar(start_xy, goal_xy, time_budget_ms=12)` is a one-shot convenience returning
 only a complete route (or `[]`); the bot uses resumable searches instead.
 `walk_clear`, `los(a_xyz, b_xyz)`,
