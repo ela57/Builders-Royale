@@ -82,13 +82,6 @@ class Geo:
 
     def ground(self, x, y):
         t = self.terrain_info
-        if isinstance(x,(int,float,np.number)) and isinstance(y,(int,float,np.number)):
-            fx = max(0.,min((float(x)-t['minX'])/t['step'],t['nx']-1))
-            fy = max(0.,min((float(y)-t['minY'])/t['step'],t['ny']-1))
-            i,j = min(int(fx),t['nx']-2),min(int(fy),t['ny']-2)
-            u,v = fx-i,fy-j
-            a = memoryview(self.terrain)
-            return (a[j,i]*(1-u)+a[j,i+1]*u)*(1-v)+(a[j+1,i]*(1-u)+a[j+1,i+1]*u)*v
         fx = np.clip((np.asarray(x)-t['minX'])/t['step'], 0, t['nx']-1)
         fy = np.clip((np.asarray(y)-t['minY'])/t['step'], 0, t['ny']-1)
         i = np.minimum(fx.astype(int), t['nx']-2)
@@ -185,21 +178,13 @@ class Geo:
         return search.path
 
     def los(self, a, b):
-        ax,ay,az = map(float,a)
-        dx,dy,dz = float(b[0])-ax,float(b[1])-ay,float(b[2])-az
-        count = max(2,math.ceil(math.sqrt(dx*dx+dy*dy+dz*dz)/2)+1)
-        step = 1/(count-1)
-        ox,oy = map(float,self.origin)
-        heights = memoryview(self.occluder)
-        for i in range(count):
-            fraction = i*step if i < count-1 else 1.
-            x = math.floor((ax+dx*fraction-ox)/2)
-            y = math.floor((ay+dy*fraction-oy)/2)
-            if x < 0 or y < 0 or x >= self.width or y >= self.height:
-                return False
-            if not az+dz*fraction >= heights[y,x]:
-                return False
-        return True
+        a,b = np.asarray(a,dtype=float),np.asarray(b,dtype=float)
+        count = max(2,math.ceil(float(np.linalg.norm(b-a))/2)+1)
+        points = a+(b-a)*np.linspace(0,1,count)[:,None]
+        cells = np.floor((points[:,:2]-self.origin)/2).astype(int)
+        if np.any(cells < 0) or np.any(cells[:,0] >= self.width) or np.any(cells[:,1] >= self.height):
+            return False
+        return bool(np.all(points[:,2] >= self.occluder[cells[:,1],cells[:,0]]))
 
     def search(self, start, goal):
         return PathSearch(self, start, goal)
@@ -227,9 +212,7 @@ class Geo:
                 continue
             x,y = cell
             wall = any(not self.is_walkable((x+dx,y+dy)) for dx,dy in ((3,0),(-3,0),(0,3),(0,-3)))
-            heights = memoryview(self.occluder)
-            nearby_top = max(heights[j,i] for j in range(max(0,y-4),min(self.height,y+5))
-                             for i in range(max(0,x-4),min(self.width,x+5)))
+            nearby_top = float(np.max(self.occluder[max(0,y-4):y+5,max(0,x-4):x+5]))
             height = max(0,nearby_top-float(self.ground(*point)))
             value = 8*wall+.2*min(40,height)-math.dist(point,me[:2])
             if value > score:

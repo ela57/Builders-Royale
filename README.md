@@ -50,8 +50,6 @@ releases a search immediately; navigation closes superseded or invalidated work
 instead of leaving large frontiers for a later garbage-collection pause.
 Startup collects garbage and freezes the long-lived geometry after loading;
 automatic garbage collection remains enabled for new runtime objects.
-LOS retains the same 2 m samples but reads the height field through a live buffer;
-scalar terrain/cover queries avoid allocating NumPy arrays during decisions.
 `astar(start_xy, goal_xy, time_budget_ms=12)` is a one-shot convenience returning
 only a complete route (or `[]`); the bot uses resumable searches instead.
 `walk_clear`, `los(a_xyz, b_xyz)`,
@@ -98,9 +96,6 @@ Pickups/crates are remembered for 90 s and cubes for 20 s, with stale nearby
 items and confirmed kills removed. Early gun-only pilots take safe remembered
 weapon detours even while watching a distant enemy, rather than forgetting loot
 as soon as it leaves the view wedge.
-Safe announced supply drops can take priority over ordinary loot. The pilot
-rejects recent damage, low health, enemy approaches, contested rings, remote or
-late arrivals and landing sites outside the next circle, then waits in the ring.
 When collision/inertia leaves a pilot outside the conservative planning grid,
 it first backs out to a valid cell rather than pushing toward an unreachable
 waypoint. Exploration/loot goals stay in its connected component, and zone

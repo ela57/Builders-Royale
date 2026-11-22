@@ -193,40 +193,6 @@ class BotTests(unittest.TestCase):
         target['aim'] = [0,0]
         self.assertNotEqual(self.bot.act(self.obs)['move'],action['move'])
 
-    def test_safe_drop_routes_from_announcement_and_waits_without_jumping(self):
-        self.obs.update(t=85,drops=[{'id':20000,'pos':[120,0,0],'radius':8,
-                                    'lands_in':10,'capture_s':4,'holder':None}])
-        action = self.bot.act(self.obs)
-        self.assertEqual(self.bot.mode,'drop')
-        self.assertGreater(action['move'][0],0)
-        self.obs['self']['pos'],self.obs['self']['vel'] = [116,0,0],[0,0,0]
-        for now in (95,96,97,98):
-            self.obs['t'] = now
-            action = self.bot.act(self.obs)
-            self.assertEqual(action['move'],[0,0])
-            self.assertFalse(action.get('jump',False))
-        self.obs['drops'] = []
-        self.bot.act(self.obs)
-        self.assertNotEqual(self.bot.mode,'drop')
-
-    def test_drop_refuses_threats_contest_remote_and_late_landing(self):
-        me,zone = self.obs['self'],self.obs['zone']
-        drop = {'id':20000,'pos':[120,0,0],'radius':8,'lands_in':10,'holder':None}
-        self.assertIsNotNone(self.bot._drop_goal(me,[drop],zone,85))
-        for updates in ({'holder':1},{'lands_in':30},{'pos':[400,0,0]}):
-            self.assertIsNone(self.bot._drop_goal(me,[{**drop,**updates}],zone,85))
-        self.bot.memory.enemies = {1:enemy(150)}
-        self.assertIsNone(self.bot._drop_goal(me,[drop],zone,85))
-        self.bot.memory.enemies = {}
-        self.bot.memory.last_damage = 84
-        self.assertIsNone(self.bot._drop_goal(me,[drop],zone,85))
-        self.assertIsNone(self.bot._drop_goal(me,[],zone,85))
-        self.bot.memory.last_damage = -math.inf
-        me['hp'] = 400
-        self.assertIsNone(self.bot._drop_goal(me,[drop],zone,85))
-        me['hp'],zone['next_radius'] = 1400,100
-        self.assertIsNone(self.bot._drop_goal(me,[drop],zone,85))
-
     def test_mortar_landing_dodge(self):
         shell = {'kind':'mortar','pos':[5,0,11],'vel':[0,0,0]}
         move = dodge(self.obs['self'],[],[shell],self.geo,{})
