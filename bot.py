@@ -144,6 +144,26 @@ class Bot:
                 move = [v*speed for v in unit(away[0]+tangent[0],away[1]+tangent[1])]
         return move
 
+    def _drop_goal(self, me, drops, zone, now):
+        if now-self.memory.last_damage < 4 or me['hp'] < .45*me['max_hp']:
+            return None
+        candidates = []
+        for drop in drops:
+            point = drop['pos']
+            distance = math.dist(me['pos'][:2],point[:2])
+            travel = max(0,distance-drop.get('radius',8)+3)/max(1,me.get('stats',{}).get('walk_speed',11.7))
+            arrival = max(travel,drop.get('lands_in',0))
+            if arrival+drop.get('capture_s',4) > 20 or distance > 180:
+                continue
+            if math.dist(point[:2],zone['next_center'])+drop.get('radius',8)+3 >= zone['next_radius'] or not self._reachable(point):
+                continue
+            if any(math.dist(enemy['pos'][:2],me['pos'][:2]) < 100 or math.dist(enemy['pos'][:2],point[:2]) < 100+min(8,arrival)*10 for enemy in self.memory.enemies.values()):
+                continue
+            if drop.get('holder') not in (None,me['id']):
+                continue
+            candidates.append((arrival,drop['id'],drop))
+        return min(candidates)[2] if candidates else None
+
     def act(self, obs):
         deadline = time.perf_counter()+.025
         me,now,zone = obs['self'],obs['t'],obs['zone']
@@ -171,10 +191,19 @@ class Bot:
         if hp_ratio >= .8:
             self.regenerating = False
         goal,move,speed = None,None,1
+        drop = self._drop_goal(me,obs.get('drops',[]),zone,now)
+        if drop is not None and me.get('in_zone',True) and math.dist(pos[:2],zone['center'])+5 < zone['radius']:
+            urgent = False
         equipment = self._loot_goal(me,zone,now,weapons_only=True) if now < 150 and not any(w and w['kind'] in DESIRED for w in me.get('weapons',[])) else None
         if urgent:
             self.mode,goal = 'zone',self._zone_goal(safe,circle)
             action['boost'] = me.get('energy',0) > 20
+        elif drop is not None:
+            self.mode,goal = 'drop',drop['pos'][:2]
+            if math.dist(pos[:2],goal) < max(1,drop.get('radius',8)-3):
+                goal,move = None,[0,0]
+            else:
+                action['boost'] = me.get('energy',0) > 50
         elif equipment is not None and hp_ratio > .7 and all(math.dist(pos[:2],enemy['pos'][:2]) > 100 for enemy in threats):
             self.mode,goal = 'equip',equipment
         elif threats and (not engage or self.regenerating):
@@ -228,13 +257,6 @@ class Bot:
                         remembered = [c for c in self.memory.crates.values() if math.dist(pos[:2],c['pos'][:2]) < 100 and self._detour_safe(c['pos'],me,zone,now)]
                         if remembered:
                             self.mode,goal = 'loot',min(remembered,key=lambda c:math.dist(pos[:2],c['pos'][:2]))['pos'][:2]
-                    if target is None and now-self.memory.last_mech >= 10:
-                        drops = [d for d in obs.get('drops',[]) if math.dist(pos[:2],d['pos'][:2]) < 80 and self._detour_safe(d['pos'],me,zone,now)]
-                        if drops:
-                            drop = min(drops,key=lambda d:math.dist(pos[:2],d['pos'][:2]))
-                            self.mode,goal = 'drop',drop['pos'][:2]
-                            if math.dist(pos[:2],goal) < max(1,drop.get('radius',8)-3):
-                                move = [0,0]
                 if goal is None and move is None and target is None:
                     if now < 150 and not any(w and w['kind'] != 'gun' for w in me.get('weapons',[])):
                         self.mode,goal = 'explore',self._explore(pos,circle,now)

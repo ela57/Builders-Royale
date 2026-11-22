@@ -42,6 +42,17 @@ class GeometryTests(unittest.TestCase):
         self.assertAlmostEqual(float(geo.ground(10.25,20.5)),10.25)
         self.assertAlmostEqual(float(geo.ground(-10,500)),0)
 
+    def test_scalar_ground_matches_vector_interpolation_and_clamping(self):
+        self.terrain = (np.indices((101,101))[0]*15+np.indices((101,101))[1]*37).astype('<i2')
+        geo = self.make_geo()
+        points = np.random.default_rng(29).uniform(-10,110,size=(500,2))
+        expected = geo.ground(points[:,0],points[:,1])
+        for point,height in zip(points,expected):
+            self.assertAlmostEqual(geo.ground(*point),height,places=12)
+        self.assertEqual(geo.ground(-100,-100),0)
+        self.assertEqual(geo.ground(500,500),52)
+        self.assertEqual(geo.ground(np.array([]),np.array([])).size,0)
+
     def test_prisms_dilation_holes_and_bridges(self):
         self.world['prisms'] = [self.prism(holes=[[46,30,54,30,54,70,46,70]])]
         geo = self.make_geo()
@@ -82,6 +93,30 @@ class GeometryTests(unittest.TestCase):
         geo.walkable[:] = False
         geo._walk = geo.walkable.tolist()
         self.assertEqual(geo.astar((15,51),(85,51)),[])
+
+    def test_los_matches_vector_samples_and_live_occluder_updates(self):
+        self.world['prisms'] = [self.prism()]
+        geo = self.make_geo()
+        def reference(a,b):
+            a,b = np.asarray(a,dtype=float),np.asarray(b,dtype=float)
+            count = max(2,int(np.ceil(np.linalg.norm(b-a)/2))+1)
+            points = a+(b-a)*np.linspace(0,1,count)[:,None]
+            cells = np.floor((points[:,:2]-geo.origin)/2).astype(int)
+            if np.any(cells < 0) or np.any(cells[:,0] >= geo.width) or np.any(cells[:,1] >= geo.height):
+                return False
+            return bool(np.all(points[:,2] >= geo.occluder[cells[:,1],cells[:,0]]))
+        rng = np.random.default_rng(17)
+        rays = list(rng.uniform([-5,-5,-5],[105,105,40],size=(500,2,3)))
+        rays += [((0,0,0),(0,0,0)),((20,20,0),(20,20,30)),
+                 ((0,0,0),(100,0,0)),((20,20,20),(80,20,20))]
+        for a,b in rays:
+            self.assertEqual(geo.los(a,b),reference(a,b),(a,b))
+        geo.occluder[:,10] = 30
+        self.assertFalse(geo.los((10,10,25),(30,10,25)))
+        geo.occluder[:,10] = 0
+        self.assertTrue(geo.los((10,10,25),(30,10,25)))
+        with self.assertRaises(ValueError):
+            geo.los((float('nan'),0,0),(0,0,0))
 
     def test_corner_crossing(self):
         geo = self.make_geo()
