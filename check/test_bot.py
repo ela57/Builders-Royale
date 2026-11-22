@@ -154,6 +154,77 @@ class BotTests(unittest.TestCase):
         pickup['pos'] = [0,0,0]
         self.assertEqual(take_weapon(me,[pickup]),{})
 
+    def test_damaging_mech_memory_ignores_npcs_zone_self_and_expires(self):
+        memory = Memory()
+        self.obs['mechs'] = [enemy(150),enemy(200,id=2)]
+        self.obs['events'] = [{'type':'damaged','by':1,'weapon':'gun','amount':30,'bearing':0},
+                              {'type':'damaged','by':99,'weapon':'npc','bearing':1},
+                              {'type':'damaged','by':None,'weapon':'zone'},
+                              {'type':'damaged','by':0,'weapon':'mortar','bearing':0},
+                              {'type':'damaged','by':3,'weapon':'laser','amount':0,'bearing':1}]
+        memory.update(self.obs)
+        self.assertEqual(set(memory.attackers),{1})
+        self.obs['events'] = [{'type':'damaged','by':2,'weapon':'laser','bearing':0}]
+        memory.update(self.obs)
+        self.assertEqual(set(memory.attackers),{1,2})
+        self.obs['events'] = [{'type':'kill','target':2}]
+        memory.update(self.obs)
+        self.assertEqual(set(memory.attackers),{1})
+        self.obs.update(t=6,events=[],mechs=[])
+        memory.update(self.obs)
+        self.assertEqual(memory.attackers,{})
+
+    def test_long_range_crossfire_precedes_loot_and_does_not_chase_finishes(self):
+        self.geo.cover = None
+        self.obs['mechs'] = [enemy(150,hp=100),enemy(220,id=2)]
+        self.obs['cubes'] = [{'id':8000,'pos':[20,0,0]}]
+        self.obs['events'] = [{'type':'damaged','by':i,'weapon':'gun','bearing':0} for i in (1,2)]
+        action = self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'disengage')
+        self.assertLess(action['move'][0],0)
+        self.assertTrue(action['boost'])
+        self.assertEqual(self.bot.target_id,1)
+
+    def test_crowd_fallback_uses_centroid_and_cover_considers_all_known_enemies(self):
+        self.geo.cover = None
+        self.obs['mechs'] = [enemy(80,40),enemy(80,-40,id=2),enemy(250,id=3)]
+        self.obs['events'] = [{'type':'damaged','by':i,'weapon':'gun','bearing':0} for i in (1,2)]
+        with patch.object(self.geo,'find_cover',return_value=None) as cover:
+            self.bot.act(self.obs)
+        self.assertEqual(self.bot.nav.goal,(-30.,0.))
+        self.assertEqual(len(cover.call_args.args[1]),3)
+
+    def test_unseen_crossfire_uses_reported_bearings_not_hidden_positions(self):
+        self.geo.cover = None
+        self.obs['events'] = [{'type':'damaged','by':i,'weapon':'laser','bearing':0} for i in (1,2)]
+        action = self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'disengage')
+        self.assertLess(action['move'][0],0)
+        self.assertEqual(self.bot.memory.attackers[1]['pos'],[100,0,0])
+        self.assertFalse(any(action['fire']))
+
+    def test_crossfire_escape_cannot_be_reversed_by_dodge_or_npc_steering(self):
+        self.geo.cover = None
+        self.obs['mechs'] = [enemy(150),enemy(200,id=2)]
+        self.obs['events'] = [{'type':'damaged','by':i,'weapon':'gun','bearing':0} for i in (1,2)]
+        with patch('bot.dodge',return_value=[1,0]), patch.object(self.bot,'_avoid_npcs',return_value=[1,0]):
+            action = self.bot.act(self.obs)
+        self.assertLess(action['move'][0],0)
+        self.assertEqual(self.bot.mode,'disengage')
+
+    def test_crossfire_keeps_urgent_zone_escape_and_single_attacker_behavior(self):
+        self.obs['mechs'] = [enemy(80)]
+        self.obs['events'] = [{'type':'damaged','by':1,'weapon':'gun','bearing':math.pi}]
+        self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'engage')
+        self.obs['self']['pos'] = [300,0,0]
+        self.obs['zone']['next_radius'] = 100
+        self.obs.update(t=99,mechs=[enemy(80),enemy(120,id=2)])
+        self.obs['events'].append({'type':'damaged','by':2,'weapon':'laser','bearing':math.pi})
+        action = self.bot.act(self.obs)
+        self.assertEqual(self.bot.mode,'zone')
+        self.assertLess(action['move'][0],0)
+
     def test_offer_priority_and_empty(self):
         self.assertIsNone(pick_offer(None))
         self.assertIsNone(pick_offer({'choices':[]}))

@@ -52,6 +52,7 @@ class Memory:
         self.last_damage = -math.inf
         self.damage_bearing = None
         self.attacker = None
+        self.attackers = {}
         self.sounds = []
         self.weapons = [None,None]
         self.pickups = {}
@@ -83,6 +84,12 @@ class Memory:
             if event['type'] == 'damaged':
                 self.last_damage,self.attacker = now,event.get('by')
                 self.damage_bearing = event.get('bearing')
+                if self.attacker is not None and self.attacker != obs['self'].get('id') and event.get('weapon') not in ('npc','zone') and self.attacker not in self.npcs and event.get('amount',1) > 0:
+                    enemy = self.enemies.get(self.attacker)
+                    bearing = event.get('bearing')
+                    if enemy is not None or bearing is not None:
+                        pos = enemy['pos'][:] if enemy is not None else [obs['self']['pos'][0]+math.cos(bearing)*100,obs['self']['pos'][1]+math.sin(bearing)*100,obs['self']['pos'][2]]
+                        self.attackers[self.attacker] = {'id':self.attacker,'pos':pos,'seen':now}
             elif event['type'] == 'took':
                 self.pickups.pop(event['id'],None)
                 slot = int(event['slot'])
@@ -95,6 +102,7 @@ class Memory:
             elif event['type'] == 'take_failed' and event.get('reason') == 'gone':
                 self.pickups.pop(event['id'],None)
             elif event['type'] == 'kill':
+                self.attackers.pop(event['target'],None)
                 victim = self.enemies.pop(event['target'],None) or self.npcs.pop(event['target'],None)
                 if victim is not None:
                     self.harvests[event['target']] = {'id':event['target'],'pos':victim['pos'][:],'seen':now}
@@ -105,6 +113,7 @@ class Memory:
                 self.harvests[crate['id']] = {'id':crate['id'],'pos':crate['pos'][:],'seen':now}
         self.harvests = {i:site for i,site in self.harvests.items() if now-site['seen'] < 90 and
                          math.dist(obs['self']['pos'][:2],site['pos'][:2]) > 2}
+        self.attackers = {i:enemy for i,enemy in self.attackers.items() if now-enemy['seen'] < 6}
         self.sounds = [(s,t) for s,t in self.sounds if now-t < 3]
         self.sounds.extend((s,now-s.get('age',0)) for s in obs.get('sounds',[]) if s['kind'] in ('gun','laser','laser_charge','step','lightning'))
         self.sounds = self.sounds[-32:]

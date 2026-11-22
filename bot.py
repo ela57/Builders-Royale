@@ -106,6 +106,27 @@ class Bot:
         travel = (math.dist(me['pos'][:2],point[:2])+max(0,math.dist(point[:2],zone['next_center'])-.6*zone['next_radius']))/max(1,me.get('stats',{}).get('walk_speed',11.7))
         return now+travel+10 < zone['shrink_start'] or math.dist(point[:2],zone['next_center'])+3 <= .6*zone['next_radius']
 
+    def _crowd_retreat(self, me, threats, circle, safe, now, deadline):
+        attackers = [self.memory.enemies.get(i,enemy) for i,enemy in self.memory.attackers.items()]
+        cx = sum(enemy['pos'][0] for enemy in attackers)/len(attackers)
+        cy = sum(enemy['pos'][1] for enemy in attackers)/len(attackers)
+        away = unit(me['pos'][0]-cx,me['pos'][1]-cy)
+        if not any(away):
+            away = unit(me['pos'][1]-attackers[0]['pos'][1],attackers[0]['pos'][0]-me['pos'][0])
+        sources = {enemy['id']:enemy for enemy in threats}
+        sources.update({enemy['id']:enemy for enemy in attackers})
+        goal = self._cover(me,list(sources.values()),circle,now,deadline)
+        if goal is None:
+            candidates = []
+            for angle in (0,math.pi/6,-math.pi/6,math.pi/3,-math.pi/3,math.pi/2,-math.pi/2):
+                dx = away[0]*math.cos(angle)-away[1]*math.sin(angle)
+                dy = away[0]*math.sin(angle)+away[1]*math.cos(angle)
+                point = [me['pos'][0]+dx*30,me['pos'][1]+dy*30]
+                if math.dist(point,circle['center'])+3 <= circle['radius'] and self._reachable(point):
+                    candidates.append(point)
+            goal = max(candidates,key=lambda point:min(math.dist(point,enemy['pos'][:2]) for enemy in sources.values())) if candidates else safe
+        return goal,away
+
     def _loot_goal(self, me, zone, now, weapons_only=False, cubes_only=False):
         held = {w['kind'] for w in me.get('weapons',[]) if w}
         candidates = []
@@ -172,10 +193,15 @@ class Bot:
         if hp_ratio >= .8:
             self.regenerating = False
         goal,move,speed = None,None,1
+        retreat_away = None
         equipment = self._loot_goal(me,zone,now,weapons_only=True) if now < 150 and not any(w and w['kind'] in DESIRED for w in me.get('weapons',[])) else None
         cubes = self._loot_goal(me,zone,now,cubes_only=True) if hp_ratio > .6 and not self.regenerating and all(math.dist(pos[:2],enemy['pos'][:2]) > 100 for enemy in threats) else None
         if urgent:
             self.mode,goal = 'zone',self._zone_goal(safe,circle)
+            action['boost'] = me.get('energy',0) > 20
+        elif len(self.memory.attackers) >= 2:
+            self.mode = 'disengage'
+            goal,retreat_away = self._crowd_retreat(me,threats,circle,safe,now,deadline)
             action['boost'] = me.get('energy',0) > 20
         elif cubes is not None:
             self.mode,goal,target = 'loot',cubes,None
@@ -259,12 +285,17 @@ class Bot:
                 point = self.geo.point(self.nav_cell)
                 move = unit(point[0]-pos[0],point[1]-pos[1])
         move = move or [0,0]
+        escape = move
         evasion = dodge(me,visible_mechs,obs.get('projectiles',[]),self.geo,self.config,deadline-.004)
         if evasion is not None:
             move = evasion
             action['boost'] = me.get('energy',0) > 0
             self.mode = 'dodge'
         move = self._avoid_npcs(pos,move,target)
+        if retreat_away is not None and sum(a*b for a,b in zip(move,retreat_away)) < 0 <= sum(a*b for a,b in zip(escape,retreat_away)):
+            move = escape
+            self.mode = 'disengage'
+            action['boost'] = me.get('energy',0) > 20
         actors = obs.get('mechs',[])+[{**c,'kind':'crate'} for c in obs.get('crates',[])]
         if time.perf_counter() < deadline-.003:
             aim,fire,reload = fire_control(me,target,target is not None and target['id'] in visible_ids,actors,self.geo,self.config,deadline-.001)

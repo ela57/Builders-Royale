@@ -97,6 +97,12 @@ items and confirmed kills removed. Early gun-only pilots take safe remembered
 weapon detours even while watching a distant enemy, rather than forgetting loot
 as soon as it leaves the view wedge.
 Safe cube routes take priority over equipment detours and distant enemies.
+Two distinct damaging mechs within six seconds trigger a cover retreat even
+when a shooter is beyond the ordinary 120 m engagement gate or outside view.
+Known enemies inform cover selection; unseen shooters use damage bearings.
+If no cover is found, retreat away from the attackers' centroid while staying
+inside the selected safe circle. Do not chase a finish or loot during crossfire;
+urgent zone movement still wins, and local dodges cannot reverse an escape.
 Confirmed mech/drone kills and hits on disappearing crates leave short-lived
 harvest sites, so drops can be approached before entering the view wedge.
 With no nearby mech threat, ground-level crates and drones are approached while
