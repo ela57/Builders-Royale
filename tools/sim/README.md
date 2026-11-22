@@ -14,6 +14,8 @@ python3 tools/sim/run.py --matches 24 --seed 1 --jobs 8 --bot example
 python3 tools/sim/run.py --matches 1 --seed 1 --mode ffa --ffa-mix mixed
 python3 tools/sim/run.py --matches 1 --seed 1 --duration 2 --jobs 1
 python3 tools/sim/run.py --matches 32 --seed 1 --mode ffa --ffa-mix example --jobs 8 --output results.json
+python3 tools/sim/run.py --matches 192 --seed 1 --jobs 8 --supply-drops --output drops.json
+python3 tools/sim/run.py --matches 192 --seed 1 --jobs 8 --npcs --output npcs.json
 python3 -m unittest discover -s tools/sim -p 'test_*.py'
 ```
 
@@ -23,6 +25,12 @@ can change path completion/decisions slightly, so this is not bit-reproducible
 across machines or job counts. Reported act times are wall times, not isolated
 1-core conformance measurements. Defaults use eight spawned worker processes.
 `--duration` exists for smoke tests; calibration uses the full 480 s limit.
+Supply drops and NPCs are opt-in, preserving historical calibration by default.
+Compare policies with identical feature flags and seed ranges; do not compare a
+new-feature run with a baseline lacking that feature. `--trace-slow` adds method
+timings to decisions exceeding 30 ms. Slow-decision records always include CPU,
+wall and per-generation GC time, so collection pauses and descheduling can be
+distinguished from bot computation. Profiling itself adds some overhead.
 
 ## Implemented
 
@@ -49,6 +57,16 @@ across machines or job counts. Reported act times are wall times, not isolated
   non-hunters wander locally until zone rotation is needed.
 - FFA uses independent copies of our bot, optionally alternating with the kit
   example. No squad vision or friendly-fire exemption in FFA.
+- Optional supply drops: configured calls/fall delays, globally visible protocol
+  observations, open landing sites in the next circle, landing sounds, exclusive
+  capture with contest freeze/empty-or-new-holder reset, cubes, full repair/energy
+  and upgrade offers. Idle nearby house bots compete for drops. Captures are
+  automatic for all agents standing in a ring, including kit examples.
+- Optional NPCs: configured count/stats, wandering and aggro/chase/home leashes,
+  retaliation, spread/projectile speed/cooldown/damage, ordinary vision and memory,
+  weapon collisions, two-cube rewards, kill events and no zone damage. Houses
+  defend against nearby drones. NPC kills do not increase mech kill counts or
+  the practice hunter count. NPC hits/captures/kills have separate telemetry.
 - Placement: same-tick deaths share `survivors_after_tick + 1`; timeout survivors
   rank by HP (ID breaks ties). Evaluation can stop after slot 0's death because
   its placement and metrics can no longer change. Otherwise ends at one alive
@@ -61,10 +79,16 @@ centre against 2 m cells, not exact prism-vs-cylinder geometry. The bot still
 plans on its normal radius-dilated grid. Air movement, roofs, bridges and slopes
 are approximate; LOS uses our height field, including its raised-prism limitation.
 There is no exact canopy/trunk vision, mech push-apart, shell/mortar simulation,
-lightning chaining, laser piercing, NPCs or supply-drop capture. Mortar pickups
+lightning chaining or laser piercing. Mortar pickups
 can spawn but cannot fire. All crates/pickups are on the ground, not roof-biased.
 Targets are swept at their tick-end positions, not continuous moving-cylinder
 trajectories.
+NPC walking uses simple independent-axis sliding without path planning or
+acceleration. NPC bullets do not hit other drones. Supply-ring capture uses a
+4 m foot-height tolerance; it does not model a falling crate's physical volume.
+Roof camping is not a credible comparison: planning is ground-only, movement
+uses cell-height approximations, and roof/crate accessibility and bridge LOS
+are not modeled faithfully enough to support that policy.
 The local loop fails loudly on bot exceptions instead of silently coasting, and
 measures (but does not enforce) wall-clock answer deadlines. Debug drawings are
 discarded between calls. House loot selection is simplified and can see nearby

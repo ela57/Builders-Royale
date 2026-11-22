@@ -8,6 +8,7 @@ class Telemetry:
         self.shots = Counter()
         self.hits = Counter()
         self.crate_hits = Counter()
+        self.npc_hits = Counter()
         self.first_held = {'laser':None,'lightning':None}
         self.modes = Counter()
         self.fights = []
@@ -55,6 +56,7 @@ class Telemetry:
         player = sim.fighters[0]
         self.close(sim.time,'lost' if not player.alive else 'timeout')
         return {'shots':dict(self.shots),'hits':dict(self.hits),'crate_hits':dict(self.crate_hits),
+                'npc_hits':dict(self.npc_hits),
                 'first_held':self.first_held,'modes':dict(self.modes),'fights':self.fights,
                 'shooters_at_death':sum(sim.time-at <= 2 for at in self.aggressors.values()) if not player.alive else None,
                 'final_fight_start_hp':self.fights[-1]['start_hp'] if self.fights else None}

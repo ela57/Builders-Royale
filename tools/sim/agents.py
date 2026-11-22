@@ -64,6 +64,13 @@ class HouseBot:
         while len(self.history) > 1 and self.history[1][0] <= now-delay:
             self.history.popleft()
         target = self.history[0][1] if self.history and self.history[0][0] <= now-delay and now-self.history[0][0] < 5 else None
+        if target is None:
+            drones = [npc for npc in sim.entities.npcs if npc['hp'] > 0 and
+                      distance(me.pos,npc['pos']) <= sim.config['npc']['aggro_range'] and
+                      sim.visible(me,npc['pos'],sim.config['npc']['height']/2)]
+            drone = min(drones,key=lambda npc:distance(me.pos,npc['pos']),default=None)
+            if drone:
+                target = {**drone,'cubes':0}
         if now >= self.next_noise:
             self.noise = [self.rng.gauss(0,sigma),self.rng.gauss(0,sigma*.4)]
             self.next_noise = now+.3
@@ -87,7 +94,14 @@ class HouseBot:
                 goal = None
         else:
             nearby = [p for p in sim.pickups if p['kind'] != 'mortar' and distance(p['pos'],me.pos) < 90 and distance(p['pos'],zone['center']) < zone['radius']*.9 and p['kind'] not in {w['kind'] for w in me.weapons if w}]
-            if nearby:
+            drops = [drop for drop in sim.entities.drops if target is None and
+                     distance(me.pos,drop['pos']) < 100 and
+                     drop['lands_at']-now < distance(me.pos,drop['pos'])/me.stats['walk_speed']+5 and
+                     distance(drop['pos'],zone['next_center'])+drop['radius'] < zone['next_radius']]
+            if drops:
+                drop = min(drops,key=lambda item:distance(me.pos,item['pos']))
+                goal = drop['pos'][:2] if distance(me.pos,drop['pos']) > drop['radius']*.5 else None
+            elif nearby:
                 goal = min(nearby,key=lambda p:distance(p['pos'],me.pos))['pos'][:2]
             elif self.last_goal is None or distance(me.pos,self.last_goal) < 8 or int(now*10) % 150 == self.id:
                 theta = self.rng.uniform(-math.pi,math.pi)
@@ -108,7 +122,8 @@ class HouseBot:
         action['aim'] = [math.atan2(action['move'][1],action['move'][0]) if any(action['move']) else angle(now*.5+self.id),0]
         if target and distance(me.pos,target['pos']) < 280:
             muzzle = [me.pos[0],me.pos[1],me.pos[2]+me.stats['muzzle_height']*me.scale]
-            point = [*target['pos'][:2],target['pos'][2]+4.5*(1+.05*target['cubes'])]
+            height = sim.config['npc']['height']/2 if target.get('kind') == 'npc' else 4.5*(1+.05*target['cubes'])
+            point = [*target['pos'][:2],target['pos'][2]+height]
             selected = next((w for w in me.weapons if w and w['kind'] == 'laser'),None)
             if selected is None:
                 gun = next((w for w in me.weapons if w and w['kind'] == 'gun'),None)

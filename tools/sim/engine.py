@@ -5,12 +5,15 @@ import random
 import time
 
 from tools.sim.agents import BotAdapter, HouseBot
+from tools.sim.entities import WorldEntities
 from tools.sim.model import Fighter, Zone, angle, cylinder_hit, direction, distance, make_weapon
 from tools.sim.telemetry import Telemetry
+from tools.sim.timing import calls, collections, reset_calls
 
 
 class Simulator:
-    def __init__(self, hello, geo, seed=1, mode='practice', bot='ours', ffa_mix='ours', duration=None):
+    def __init__(self, hello, geo, seed=1, mode='practice', bot='ours', ffa_mix='ours', duration=None,
+                 supply_drops=False, npcs=False):
         self.hello,self.config,self.geo = deepcopy(hello),deepcopy(hello['config']),geo
         self.seed,self.mode,self.bot_kind = seed,mode,bot
         self.rng = random.Random(seed)
@@ -21,6 +24,7 @@ class Simulator:
         self.projectiles,self.cubes,self.pickups,self.crates,self.beams = [],[],[],[],[]
         self.next_id = 30000
         self.timings = []
+        self.slow_decisions = []
         self.telemetry = Telemetry()
         self.last_known = None
         self.last_known_at = -1e9
@@ -33,6 +37,7 @@ class Simulator:
             self.crates.append({'id':1000+i,'pos':self.open_point(),'hp':self.config['crates']['hp']})
         for i in range(int(self.config['loot']['floor_count'])):
             self.pickups.append({'id':8000+i,'pos':self.open_point(),'kind':self.random_weapon()})
+        self.entities = WorldEntities(self,supply_drops,npcs)
         self.agents = {}
         self.agents[0] = BotAdapter(bot,self.make_hello(0),geo)
         if mode == 'practice':
@@ -114,14 +119,16 @@ class Simulator:
                 actors.append(other.actor())
         def items(collection, height=0):
             return [{k:deepcopy(v) for k,v in item.items() if k in ('id','pos','kind','hp')} for item in collection if self.visible(viewer,item['pos'],height)]
+        actors += self.entities.npc_observations(viewer)
         sounds = [{**s,'age':self.time-s['age']} for s in viewer.sounds]
         obs = {'type':'obs','tick':self.tick,'t':self.time,'alive':sum(f.alive for f in self.fighters),
                'self':viewer.observation(zone),'mechs':actors,
-               'projectiles':[{'id':p['id'],'kind':'gun','pos':p['pos'][:],'vel':p['vel'][:]} for p in self.projectiles if p['owner'] != viewer.id and self.visible(viewer,p['pos'])],
+               'projectiles':[{'id':p['id'],'kind':p.get('kind','gun'),'pos':p['pos'][:],'vel':p['vel'][:]} for p in self.projectiles if p['owner'] != viewer.id and self.visible(viewer,p['pos'])],
                'crates':items(self.crates,self.config['crates']['height']/2),
                'cubes':items(self.cubes),'pickups':items(self.pickups),
                'sounds':sounds,'beams':[{**deepcopy(b),'age':self.time-b['age']} for b in self.beams if b['by'] != viewer.id and any(self.visible(viewer,p) for p in b['path'])],
-               'events':deepcopy(viewer.events),'zone':zone,'offer':deepcopy(viewer.offer),'drops':[]}
+               'events':deepcopy(viewer.events),'zone':zone,'offer':deepcopy(viewer.offer),
+               'drops':self.entities.drop_observations()}
         viewer.events.clear()
         viewer.sounds.clear()
         return obs
@@ -163,11 +170,23 @@ class Simulator:
                 fighter.sounds.clear()
             else:
                 obs = self.observe(fighter)
+                gc_before = collections()
+                reset_calls()
+                cpu_start = time.process_time()
                 start = time.perf_counter()
                 action = agent.act(obs)
                 elapsed = (time.perf_counter()-start)*1000
                 if fighter.id == 0:
                     self.timings.append(elapsed)
+                    if elapsed >= 30:
+                        gc_after = collections()
+                        self.slow_decisions.append({'tick':self.tick,'wall_ms':elapsed,
+                            'cpu_ms':(time.process_time()-cpu_start)*1000,
+                            'gc_wall_ms':(gc_after[0]-gc_before[0])*1000,
+                            'gc_cpu_ms':(gc_after[1]-gc_before[1])*1000,
+                            'gc_generations_ms':[(gc_after[i]-gc_before[i])*1000 for i in range(2,5)],
+                            'calls_ms':calls(),
+                            'pos':fighter.pos[:],'mode':getattr(agent.bot,'mode',None)})
             actions.append((fighter,action or {}))
         def take_order(pair):
             fighter,action = pair
@@ -332,7 +351,8 @@ class Simulator:
             me.last_step = self.time
 
     def enemies(self, owner):
-        return [f for f in self.fighters if f.alive and f.id != owner and not (self.mode == 'practice' and owner != 0 and f.id != 0)]
+        squad = self.mode == 'practice' and owner is not None and 0 < owner < len(self.fighters)
+        return [f for f in self.fighters if f.alive and f.id != owner and not (squad and f.id != 0)]
 
     def muzzle(self, me, yaw=None, pitch=None):
         yaw,pitch = me.aim if yaw is None else (yaw,pitch)
@@ -352,6 +372,14 @@ class Simulator:
             hit = cylinder_hit(a,b,crate['pos'],self.config['crates']['radius']+radius,self.config['crates']['height'])
             if hit is not None:
                 hits.append((hit,crate['id'],crate))
+        if owner is not None and 0 <= owner < len(self.fighters):
+            cfg = self.config['npc']
+            for npc in self.entities.npcs:
+                if npc['hp'] <= 0:
+                    continue
+                hit = cylinder_hit(a,b,npc['pos'],cfg['radius']+radius,cfg['height'])
+                if hit is not None:
+                    hits.append((hit,npc['id'],npc))
         if not hits:
             return None,None
         fraction,_,target = min(hits,key=lambda h:(h[0],h[1]))
@@ -361,20 +389,23 @@ class Simulator:
         return None,None
 
     def damage(self, owner, target, amount, kind, source):
-        attacker = self.fighters[owner] if owner is not None else None
+        attacker = self.fighters[owner] if owner is not None and 0 <= owner < len(self.fighters) else None
         if isinstance(target,dict):
             if target['hp'] <= 0:
                 return
             target['hp'] -= amount
+            npc = target.get('kind') == 'npc'
+            if npc and attacker:
+                target['target'],target['last_by'],target['returning'] = owner,owner,False
             if owner == 0:
-                self.telemetry.crate_hits[kind] += 1
+                (self.telemetry.npc_hits if npc else self.telemetry.crate_hits)[kind] += 1
             if attacker:
                 attacker.last_combat = self.time
                 attacker.events.append({'type':'hit','target':target['id'],'amount':amount,'weapon':kind})
             return
         if not target.alive or target.hp <= 0:
             return
-        if target.id == 0 and owner is not None:
+        if target.id == 0 and attacker is not None:
             self.telemetry.contact(self.time,target)
             self.telemetry.aggressors[owner] = self.time
         if owner == 0:
@@ -387,7 +418,7 @@ class Simulator:
             amount *= (target.stats['rear_mult'] if rear else 1)*(1-min(.95,target.stats.get('armor',0)))
         target.hp -= amount
         target.last_combat,target.last_by = self.time,owner
-        target.cause = 'zone' if kind == 'zone' else 'mech'
+        target.cause = 'zone' if kind == 'zone' else ('npc' if kind == 'npc' else 'mech')
         target.events.append({'type':'damaged','amount':amount,'weapon':kind,'bearing':bearing,'by':owner,'rear':rear})
         if attacker:
             attacker.last_combat = self.time
@@ -448,10 +479,10 @@ class Simulator:
                 w['cooldown'] = stats['cooldown']+overdue
                 a,_ = self.muzzle(me)
                 candidates = []
-                targets = self.enemies(me.id)+self.crates
+                targets = self.enemies(me.id)+self.crates+self.entities.npcs
                 for target in targets:
                     p = target['pos'] if isinstance(target,dict) else target.pos
-                    height = 1.2 if isinstance(target,dict) else target.stats['height']*target.scale/2
+                    height = (self.config['npc']['height']/2 if target.get('kind') == 'npc' else 1.2) if isinstance(target,dict) else target.stats['height']*target.scale/2
                     point = [p[0],p[1],p[2]+height]
                     if math.dist(a,point) <= stats['range'] and abs(angle(math.atan2(p[1]-a[1],p[0]-a[0])-me.aim[0])) <= math.radians(stats['cone_deg']) and self.geo.los(a,point):
                         candidates.append((math.dist(a,point),target,point))
@@ -480,7 +511,7 @@ class Simulator:
             target,point = self.ray_target(bullet['owner'],a,b,self.config['projectile']['gun_radius'])
             if target is not None:
                 source = [target.pos[i]-bullet['vel'][i] for i in range(3)] if isinstance(target,Fighter) else bullet['source']
-                self.damage(bullet['owner'],target,bullet['damage'],'gun',source)
+                self.damage(bullet['owner'],target,bullet['damage'],bullet.get('kind','gun'),source)
             elif self.geo.los(a,b) and bullet['left'] > length:
                 bullet['pos'],bullet['left'] = b,bullet['left']-length
                 remaining.append(bullet)
@@ -510,7 +541,7 @@ class Simulator:
         for fighter in dead:
             fighter.alive,fighter.place,fighter.death_time = False,place,self.time+self.dt
             self.dead.append(fighter.id)
-            if fighter.last_by is not None:
+            if fighter.last_by is not None and 0 <= fighter.last_by < len(self.fighters):
                 killer = self.fighters[fighter.last_by]
                 killer.kills += 1
                 if killer.id == 0 and self.telemetry.active:
@@ -530,6 +561,7 @@ class Simulator:
                 self.crates.remove(crate)
 
     def step(self):
+        self.entities.announce()
         if self.tick % self.config['match']['decide_every'] == 0:
             self.decide()
         if self.fighters[0].alive:
@@ -538,6 +570,7 @@ class Simulator:
         for fighter in self.fighters:
             if fighter.alive:
                 self.move(fighter)
+        self.entities.move_npcs()
         for fighter in self.fighters:
             if fighter.alive:
                 self.weapons(fighter)
@@ -553,6 +586,8 @@ class Simulator:
             if fighter.hp > 0:
                 self.collect(fighter)
         self.resolve_deaths()
+        self.entities.resolve_npcs()
+        self.entities.capture()
         self.tick += 1
         self.time = self.tick*self.dt
 
@@ -563,7 +598,10 @@ class Simulator:
         player = self.fighters[0]
         return {'seed':self.seed,'place':player.place,'score':16-player.place,'cause':player.cause,
                 'kills':player.kills,'cubes':player.cubes,'time_alive':round(player.death_time,2),
-                'timings':self.timings,'telemetry':self.telemetry.result(self)}
+                'timings':self.timings,'telemetry':self.telemetry.result(self),
+                'world':{'drop_captures':dict(self.entities.drop_captures),
+                         'npc_kills':dict(self.entities.npc_kills)},
+                'slow_decisions':self.slow_decisions}
 
     def run(self):
         while self.time < self.duration and sum(f.alive for f in self.fighters) > 1 and self.fighters[0].alive:

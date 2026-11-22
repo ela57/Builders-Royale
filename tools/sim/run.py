@@ -15,18 +15,21 @@ sys.path.insert(0,str(ROOT))
 
 from geo import Geo
 from tools.sim.engine import Simulator
+from tools.sim.timing import trace_calls
 
 
-def initialize():
+def initialize(trace=False):
     global HELLO, GEO
     with gzip.open(ROOT / 'check/stream.jsonl.gz','rt') as stream:
         HELLO = json.loads(next(stream))
     GEO = Geo(ROOT / 'arena')
+    if trace:
+        trace_calls()
 
 
 def match(arguments):
-    seed,mode,bot,mix,duration = arguments
-    return Simulator(HELLO,GEO,seed,mode,bot,mix,duration).run()
+    seed,mode,bot,mix,duration,drops,npcs = arguments
+    return Simulator(HELLO,GEO,seed,mode,bot,mix,duration,drops,npcs).run()
 
 
 def main():
@@ -39,18 +42,21 @@ def main():
     parser.add_argument('--ffa-mix',choices=('ours','mixed','example'),default='ours',help='other FFA slots: ours, mixed, or all kit examples')
     parser.add_argument('--output',type=Path,help='save per-match metrics and timing samples as JSON')
     parser.add_argument('--duration',type=float,default=None,help='short smoke tests only; default uses hello duration (480 s)')
+    parser.add_argument('--supply-drops',action='store_true',help='enable protocol supply-drop calls, landing and capture')
+    parser.add_argument('--npcs',action='store_true',help='enable protocol leashed NPC drones')
+    parser.add_argument('--trace-slow',action='store_true',help='profile geometry/navigation methods for slow-decision diagnosis')
     args = parser.parse_args()
     if args.matches < 1 or args.jobs < 1 or (args.duration is not None and args.duration <= 0):
         parser.error('matches, jobs and duration must be positive')
     print(f'Local approximate simulator: mode={args.mode} bot={args.bot} matches={args.matches} seed={args.seed} jobs={min(args.jobs,args.matches)}',flush=True)
-    arguments = [(args.seed+i,args.mode,args.bot,args.ffa_mix,args.duration) for i in range(args.matches)]
+    arguments = [(args.seed+i,args.mode,args.bot,args.ffa_mix,args.duration,args.supply_drops,args.npcs) for i in range(args.matches)]
     results = []
     if args.jobs == 1:
-        initialize()
+        initialize(args.trace_slow)
         iterator = map(match,arguments)
         pool = None
     else:
-        pool = ProcessPoolExecutor(max_workers=min(args.jobs,args.matches),initializer=initialize,
+        pool = ProcessPoolExecutor(max_workers=min(args.jobs,args.matches),initializer=initialize,initargs=(args.trace_slow,),
                                    mp_context=multiprocessing.get_context('spawn'))
         iterator = pool.map(match,arguments)
     try:
@@ -87,6 +93,13 @@ def main():
     print('Mode seconds: '+', '.join(f'{mode}={seconds:.1f} ({100*seconds/max(1,sum(modes.values())):.1f}%)' for mode,seconds in modes.most_common()))
     final_hp = [r['telemetry']['final_fight_start_hp'] for r in results if r['telemetry']['final_fight_start_hp'] is not None]
     print(f'Final fight starting HP mean={statistics.mean(final_hp):.1f}' if final_hp else 'No final fights')
+    slow = [{'seed':r['seed'],**decision} for r in results for decision in r['slow_decisions']]
+    print(f'Slow decisions (>=30 ms): {len(slow)}; '+json.dumps(slow[:20]))
+    print(f"Our supply-drop captures: {sum(r['world']['drop_captures'].get(0,0) for r in results)}; NPC kills: {sum(r['world']['npc_kills'].get(0,0) for r in results)}")
+    npc_hits = Counter()
+    for result in results:
+        npc_hits.update(result['telemetry']['npc_hits'])
+    print(f'Our NPC hits by weapon (separate from mech hits): {dict(npc_hits)}')
     if args.output:
         args.output.write_text(json.dumps({'arguments':vars(args)|{'output':str(args.output)},'results':results},indent=2))
     if args.bot == 'example' and args.mode == 'practice':

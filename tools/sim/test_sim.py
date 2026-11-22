@@ -9,6 +9,7 @@ import random
 import sys
 import tempfile
 import unittest
+import weakref
 from unittest.mock import patch
 
 import numpy as np
@@ -20,6 +21,7 @@ from check.check import Schema
 from geo import Geo
 from tools.sim.agents import BotAdapter, HouseBot, TIERS
 from tools.sim.engine import Simulator
+from tools.sim.entities import WorldEntities
 from tools.sim.model import Fighter, Zone, cylinder_hit, distance, make_weapon
 
 
@@ -472,6 +474,200 @@ class SimulatorTests(unittest.TestCase):
         self.sim.telemetry.contact(0,self.me)
         self.sim.telemetry.contact(10,self.me)
         self.assertEqual(self.sim.telemetry.fights[0]['outcome'],'disengaged')
+
+    def landed_drop(self):
+        self.sim.entities = WorldEntities(self.sim,drops=True)
+        self.sim.entities.drops = [{'id':90000,'pos':[10.,10.,0.],'radius':8,
+            'lands_at':0.,'capture_s':4.,'progress':0.,'holder':None,'landed':False}]
+        return self.sim.entities.drops[0]
+
+    def drone(self):
+        self.sim.entities = WorldEntities(self.sim,npcs=True)
+        npc = self.sim.entities.npcs[0]
+        npc.update(pos=[80.,80.,0.],home=[80.,80.,0.],wander=[80.,80.,0.])
+        self.sim.entities.npcs = [npc]
+        return npc
+
+    def test_optional_entities_are_empty_by_default(self):
+        self.assertEqual(self.sim.observe(self.me)['drops'],[])
+        self.assertEqual(self.sim.entities.npcs,[])
+
+    def test_entities_do_not_retain_finished_simulator(self):
+        entities = self.sim.entities
+        sim = weakref.ref(self.sim)
+        self.sim = None
+        self.assertIsNone(sim())
+        with self.assertRaises(ReferenceError):
+            entities.open_point()
+
+    def test_drop_announcement_landing_and_protocol_shape(self):
+        self.sim.entities = WorldEntities(self.sim,drops=True)
+        self.sim.zone.at = lambda now:{'next_center':[100,100],'next_radius':80,
+            'center':[100,100],'radius':100,'shrink_start':120,'shrink_end':150,'dps':1}
+        self.sim.time = 69.95
+        self.sim.entities.announce()
+        self.assertEqual(self.sim.entities.drops,[])
+        self.sim.time = 70
+        self.sim.entities.announce()
+        self.sim.entities.announce()
+        self.assertEqual(len(self.sim.entities.drops),1)
+        drop = self.sim.entities.drops[0]
+        obs = self.sim.observe(self.me)
+        self.assertEqual(self.schema.errors(obs,'Observation'),[])
+        self.assertEqual(obs['drops'][0]['lands_in'],25)
+        self.assertLessEqual(distance(drop['pos'],[100,100]),80)
+        self.me.pos = drop['pos'][:]
+        self.sim.entities.capture()
+        self.assertEqual(drop['progress'],0)
+        self.sim.time = 95
+        self.sim.entities.capture()
+        self.assertAlmostEqual(drop['progress'],.05)
+        self.assertTrue(any(sound['kind'] == 'drop' for sound in self.me.sounds))
+
+    def test_drop_capture_repairs_rewards_and_offers(self):
+        drop = self.landed_drop()
+        self.me.hp,self.me.energy = 50,1
+        for _ in range(79):
+            self.sim.entities.capture()
+        self.assertEqual(self.me.cubes,0)
+        self.sim.entities.capture()
+        self.assertEqual(self.me.cubes,3)
+        self.assertEqual(self.me.hp,self.me.max_hp)
+        self.assertEqual(self.me.energy,self.me.stats['energy'])
+        self.assertIsNotNone(self.me.offer)
+        self.assertEqual(self.sim.entities.drops,[])
+        self.assertIn({'type':'drop','id':drop['id'],'cubes':3},self.me.events)
+        self.assertEqual(self.sim.entities.drop_captures[0],1)
+        self.sim.entities.capture()
+        self.assertEqual(self.me.cubes,3)
+
+    def test_drop_contest_freezes_empty_and_new_holder_reset(self):
+        drop = self.landed_drop()
+        self.sim.entities.capture()
+        self.enemy.pos = self.me.pos[:]
+        self.sim.entities.capture()
+        self.assertEqual(drop['progress'],.05)
+        self.me.pos = [60.,10.,0.]
+        self.sim.entities.capture()
+        self.assertEqual(drop['holder'],1)
+        self.assertEqual(drop['progress'],.05)
+        self.enemy.pos = [60.,20.,0.]
+        self.sim.entities.capture()
+        self.assertIsNone(drop['holder'])
+        self.assertEqual(drop['progress'],0)
+        self.me.pos = [10.,10.,20.]
+        self.sim.entities.capture()
+        self.assertEqual(drop['progress'],0)
+
+    def test_drop_no_legal_site_fails_explicitly(self):
+        self.sim.entities = WorldEntities(self.sim,drops=True)
+        self.sim.time = 70
+        self.sim.zone.at = lambda now:{'next_center':[1000,1000],'next_radius':1}
+        with self.assertRaisesRegex(RuntimeError,'No legal supply-drop'):
+            self.sim.entities.announce()
+
+    def test_npc_protocol_vision_memory_and_zone_immunity(self):
+        npc = self.drone()
+        self.assertEqual(len(WorldEntities(self.sim,npcs=True).npcs),12)
+        self.me.pos = [60.,80.,0.]
+        obs = self.sim.observe(self.me)
+        self.assertEqual(self.schema.errors(obs,'Observation'),[])
+        self.assertEqual([a['id'] for a in obs['mechs'] if a['kind'] == 'npc'],[npc['id']])
+        self.me.pos = [10.,10.,0.]
+        self.me.aim = [-math.pi,0]
+        self.sim.time = 4.9
+        self.assertTrue(self.sim.entities.npc_observations(self.me))
+        self.sim.time = 5.1
+        self.assertEqual(self.sim.entities.npc_observations(self.me),[])
+        self.me.alive = self.enemy.alive = False
+        self.sim.zone.at = lambda now:{'center':[-1000,-1000],'radius':1,'dps':1000}
+        self.sim.step()
+        self.assertEqual(npc['hp'],350)
+
+    def test_npc_aggro_bullets_retaliation_and_rewards(self):
+        npc = self.drone()
+        self.me.pos = [60.,80.,0.]
+        self.me.aim = [0,0]
+        self.sim.config['npc']['spread_deg'] = 0
+        self.sim.entities.move_npcs()
+        self.assertEqual(npc['target'],0)
+        self.assertEqual(len(self.sim.projectiles),1)
+        self.assertEqual(self.sim.observe(self.me)['projectiles'][0]['kind'],'npc')
+        hp = self.me.hp
+        for _ in range(6):
+            self.sim.advance_projectiles()
+        self.assertLess(self.me.hp,hp)
+        self.assertEqual(self.me.events[-1]['weapon'],'npc')
+        self.sim.damage(1,npc,100,'gun',self.enemy.pos)
+        self.assertEqual(npc['target'],1)
+        self.sim.damage(0,npc,250,'laser',self.me.pos)
+        self.sim.entities.resolve_npcs()
+        self.assertEqual(len(self.sim.cubes),2)
+        self.assertEqual(self.sim.entities.npcs,[])
+        self.assertEqual(self.me.kills,0)
+        self.assertEqual(self.sim.entities.npc_kills[0],1)
+        self.assertIn({'type':'kill','target':npc['id']},self.me.events)
+        self.assertEqual(self.sim.telemetry.npc_hits['laser'],1)
+        self.sim.entities.resolve_npcs()
+        self.assertEqual(len(self.sim.cubes),2)
+
+    def test_npc_home_leash_deaggro_and_wall_sliding(self):
+        npc = self.drone()
+        self.sim.entities.move_npcs()
+        self.assertIsNone(npc['target'])
+        self.assertLessEqual(distance(npc['wander'],npc['home']),30)
+        npc.update(pos=[140.,80.,0.],target=0)
+        self.me.pos = [150.,80.,0.]
+        self.sim.entities.move_npcs()
+        self.assertIsNone(npc['target'])
+        self.assertTrue(npc['returning'])
+        self.assertLess(npc['pos'][0],140)
+        npc.update(pos=[80.,80.,0.],target=0,returning=False)
+        self.me.pos = [180.,80.,0.]
+        self.sim.entities.move_npcs()
+        self.assertIsNone(npc['target'])
+        npc.update(pos=[39.,40.,0.],home=[39.,40.,0.],target=None,returning=False,wander=[60,60])
+        self.me.alive = self.enemy.alive = False
+        self.wall()
+        for _ in range(20):
+            self.sim.entities.move_npcs()
+        self.assertLess(npc['pos'][0],40)
+        self.assertGreater(npc['pos'][1],40)
+
+    def test_npc_hitscan_lightning_and_npc_death_attribution(self):
+        npc = self.drone()
+        self.me.pos,self.me.aim = [60.,80.,0.],[0,0]
+        target,_ = self.sim.ray_target(0,[60,80,1.75],[100,80,1.75])
+        self.assertIs(target,npc)
+        self.me.weapons = [make_weapon('lightning',self.sim.config),None]
+        self.me.action = {'fire':[True,False]}
+        self.me.aim = [0,-.27]
+        self.sim.weapons(self.me)
+        self.assertEqual(npc['hp'],290)
+        self.sim.damage(npc['id'],self.me,100000,'npc',npc['pos'])
+        self.sim.resolve_deaths()
+        self.assertEqual(self.me.cause,'npc')
+        self.assertEqual(self.enemy.kills,0)
+
+    def test_house_defends_against_nearby_drone(self):
+        npc = self.drone()
+        self.enemy.pos,self.enemy.aim = [60.,80.,0.],[0,0]
+        agent = self.sim.agents[1]
+        agent.noise,agent.next_noise = [0,0],100
+        action = agent.act(self.sim,self.enemy,None,False)
+        self.assertTrue(action['fire'][0])
+        self.assertLess(action['aim'][1],0)
+
+    def test_idle_house_competes_for_landed_supply_drop(self):
+        self.landed_drop()
+        self.enemy.pos = [35.,10.,0.]
+        self.sim.zone.at = lambda now:{'center':[100,100],'radius':500,'next_center':[100,100],
+            'next_radius':500,'shrink_start':100,'shrink_end':150,'dps':1}
+        agent = self.sim.agents[1]
+        action = agent.act(self.sim,self.enemy,None,False)
+        self.assertLess(action['move'][0],0)
+        self.enemy.pos = [10.,10.,0.]
+        self.assertEqual(agent.act(self.sim,self.enemy,None,False)['move'],[0,0])
 
 
 if __name__ == '__main__':
