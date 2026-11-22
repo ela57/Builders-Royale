@@ -3,13 +3,19 @@ import gc
 import math
 from pathlib import Path
 import random
+import signal
+import threading
 import time
 
 from brain import DESIRED, Memory, pick_offer, safe_point, take_weapon
 from combat import best_weapon, dodge, fire_control, unit
-from geo import Geo
+from geo import BudgetExceeded, DecisionTimeout, Geo
 import mechfight as mf
 from navigation import Navigator
+
+
+def decision_alarm(signum, frame):
+    raise DecisionTimeout
 
 
 class Bot:
@@ -146,7 +152,39 @@ class Bot:
         return move
 
     def act(self, obs):
-        deadline = time.perf_counter()+.025
+        previous = getattr(self.geo,'deadline',math.inf)
+        self.geo.deadline = min(previous,time.perf_counter()+.013)
+        handler = None
+        try:
+            try:
+                if hasattr(signal,'setitimer') and threading.current_thread() is threading.main_thread() and signal.getitimer(signal.ITIMER_REAL) == (0.,0.):
+                    handler = signal.getsignal(signal.SIGALRM)
+                    if handler is not None:
+                        signal.signal(signal.SIGALRM,decision_alarm)
+                        signal.setitimer(signal.ITIMER_REAL,.014)
+                if hasattr(self.geo,'collect_retired'):
+                    self.geo.collect_retired(min(self.geo.deadline,time.perf_counter()+.0005))
+                return self._act(obs)
+            finally:
+                if handler is not None:
+                    try:
+                        signal.setitimer(signal.ITIMER_REAL,0)
+                    finally:
+                        signal.signal(signal.SIGALRM,handler)
+        except DecisionTimeout:
+            self.nav.invalidate()
+            return self._coast(obs)
+        except BudgetExceeded:
+            return self._coast(obs)
+        finally:
+            self.geo.deadline = previous
+
+    def _coast(self, obs):
+        return {'tick':obs.get('tick',0),'move':self.last_move[:],
+                'aim':obs['self'].get('aim',[0,0])[:],'fire':[False,False]}
+
+    def _act(self, obs):
+        deadline = self.geo.deadline
         me,now,zone = obs['self'],obs['t'],obs['zone']
         pos = me['pos']
         if hasattr(self.geo,'components'):

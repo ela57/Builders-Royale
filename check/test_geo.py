@@ -1,16 +1,20 @@
 """Small deterministic maps exercise geometry without the practice recording."""
 import json
 import gc
+import math
+import random
+import signal
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 import weakref
+from unittest.mock import patch
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from geo import Geo
+from geo import BudgetExceeded, DecisionTimeout, Geo
 from navigation import Navigator
 from bot import Bot
 
@@ -41,6 +45,142 @@ class GeometryTests(unittest.TestCase):
         geo = self.make_geo()
         self.assertAlmostEqual(float(geo.ground(10.25,20.5)),10.25)
         self.assertAlmostEqual(float(geo.ground(-10,500)),0)
+
+    def test_scalar_geometry_matches_vector_reference(self):
+        self.terrain = (np.indices((101,101))[1]*31+np.indices((101,101))[0]*7).astype('<i2')
+        self.world['prisms'] = [self.prism()]
+        geo = self.make_geo()
+        rng = random.Random(8)
+        for _ in range(300):
+            a,b = [np.array([rng.uniform(-5,105),rng.uniform(-5,105),rng.uniform(-1,30)]) for _ in range(2)]
+            count = max(2,math.ceil(float(np.linalg.norm(b-a))/2)+1)
+            points = a+(b-a)*np.linspace(0,1,count)[:,None]
+            cells = np.floor((points[:,:2]-geo.origin)/2).astype(int)
+            inside = np.all(cells >= 0) and np.all(cells[:,0] < geo.width) and np.all(cells[:,1] < geo.height)
+            expected = bool(inside and np.all(points[:,2] >= geo.occluder[cells[:,1],cells[:,0]]))
+            self.assertEqual(geo.los(a,b),expected)
+            self.assertAlmostEqual(geo.ground(*a[:2]),geo.ground(a[:1],a[1:2])[0],places=12)
+
+    def test_expired_geometry_budget_fails_closed(self):
+        geo = self.make_geo()
+        geo.deadline = 0
+        for call in (lambda:geo.los((10,10,5),(90,90,5)),lambda:geo.nearest((10,10)),
+                     lambda:geo.walk_clear((10,10),(90,90)),lambda:geo.ground(10,10)):
+            with self.assertRaises(BudgetExceeded):
+                call()
+        self.assertEqual(geo.search((10,10),(90,90)).advance(8),'pending')
+        geo.deadline = math.inf
+        self.assertIsNone(geo.find_cover((10,10,0),[],{'center':[50,50],'radius':80},time_budget_ms=0))
+
+    def test_cover_returns_only_completed_candidates_and_restores_deadline(self):
+        geo = self.make_geo()
+        clock = [0.]
+        visited = []
+        def score(cell, threats):
+            visited.append(geo.point(cell))
+            if len(visited) == 2:
+                clock[0] = .2
+            return len(threats)
+        with patch('geo.time.perf_counter',side_effect=lambda:clock[0]),patch.object(geo,'cover_score',side_effect=score):
+            result = geo.find_cover((50,50,0),[[0,0,0]],{'center':[50,50],'radius':80},time_budget_ms=100)
+            self.assertEqual(result,visited[0])
+            self.assertEqual(geo.deadline,math.inf)
+            clock[0],visited[:] = 0.,[]
+            geo.deadline = .15
+            with self.assertRaises(BudgetExceeded):
+                geo.find_cover((50,50,0),[[0,0,0]],{'center':[50,50],'radius':80},time_budget_ms=100)
+            self.assertEqual(geo.deadline,.15)
+
+    def test_search_slices_resume_through_expansion_and_smoothing(self):
+        geo = self.make_geo()
+        clock = [0.]
+        walkable = geo.is_walkable
+        def work(cell):
+            clock[0] += .00002
+            return walkable(cell)
+        search = geo.search((10,10),(90,90))
+        with patch('geo.time.perf_counter',side_effect=lambda:clock[0]),patch.object(geo,'is_walkable',side_effect=work):
+            for _ in range(10000):
+                start = clock[0]
+                search.advance(.1)
+                self.assertLessEqual(clock[0]-start,.000161)
+                if search.status != 'pending':
+                    break
+        self.assertEqual(search.status,'complete')
+        self.assertTrue(all(geo.walk_clear(a,b) for a,b in zip(search.path,search.path[1:])))
+
+    def test_cancelled_search_retires_heavy_storage_without_synchronous_destruction(self):
+        geo = self.make_geo()
+        freed = []
+        class Item:
+            def __del__(self):
+                freed.append(1)
+        search = geo.search((10,10),(90,90))
+        search._containers.append([Item() for _ in range(1000)])
+        search.close()
+        self.assertEqual(freed,[])
+        clock = [0.]
+        def tick():
+            clock[0] += .00001
+            return clock[0]
+        with patch('geo.time.perf_counter',side_effect=tick):
+            geo.collect_retired(.0001)
+        self.assertGreater(len(freed),0)
+        self.assertLess(len(freed),1000)
+        geo.collect_retired(math.inf)
+        self.assertEqual(len(freed),1000)
+        self.assertFalse(geo._retired)
+
+    def test_decision_budget_coasts_without_firing_and_does_not_hide_errors(self):
+        geo = self.make_geo()
+        bot = Bot({},geo=geo)
+        bot.last_move = [.2,-.5]
+        obs = {'tick':9,'self':{'aim':[1,.1]}}
+        with patch.object(bot,'_act',side_effect=BudgetExceeded):
+            action = bot.act(obs)
+        self.assertEqual(action,{'tick':9,'move':[.2,-.5],'aim':[1,.1],'fire':[False,False]})
+        self.assertEqual(geo.deadline,math.inf)
+        with patch.object(bot,'_act',side_effect=ValueError),self.assertRaises(ValueError):
+            bot.act(obs)
+        self.assertEqual(geo.deadline,math.inf)
+
+    @unittest.skipUnless(hasattr(signal,'setitimer'),'POSIX wall timers required')
+    def test_wall_alarm_interrupts_uncooperative_work_and_restores_signal_state(self):
+        if signal.getitimer(signal.ITIMER_REAL) != (0.,0.):
+            self.skipTest('External wall timer is active')
+        geo = self.make_geo()
+        bot = Bot({},geo=geo)
+        before = signal.getsignal(signal.SIGALRM)
+        def busy(obs):
+            while True:
+                pass
+        with patch.object(bot,'_act',side_effect=busy):
+            action = bot.act({'tick':9,'self':{}})
+        self.assertEqual(action['fire'],[False,False])
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL),(0.,0.))
+        self.assertIs(signal.getsignal(signal.SIGALRM),before)
+        self.assertEqual(geo.deadline,math.inf)
+
+    @unittest.skipUnless(hasattr(signal,'setitimer'),'POSIX wall timers required')
+    def test_wall_alarm_preserves_existing_timer_and_cancels_interrupted_search(self):
+        geo = self.make_geo()
+        bot = Bot({},geo=geo)
+        obs = {'tick':9,'self':{}}
+        try:
+            signal.setitimer(signal.ITIMER_REAL,2)
+            with patch.object(bot,'_act',return_value={'move':[0,0]}):
+                bot.act(obs)
+            self.assertGreater(signal.getitimer(signal.ITIMER_REAL)[0],1)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL,0)
+        bot.nav.move([10,10,0],[90,90],0,budget_ms=0)
+        self.assertIsNotNone(bot.nav.search)
+        with patch.object(bot,'_act',side_effect=DecisionTimeout):
+            self.assertEqual(bot.act(obs)['fire'],[False,False])
+        self.assertIsNone(bot.nav.search)
+        with patch.object(geo,'_find_cover',side_effect=DecisionTimeout),self.assertRaises(DecisionTimeout):
+            geo.find_cover([10,10,0],[],{'center':[50,50],'radius':80})
+        self.assertEqual(geo.deadline,math.inf)
 
     def test_prisms_dilation_holes_and_bridges(self):
         self.world['prisms'] = [self.prism(holes=[[46,30,54,30,54,70,46,70]])]

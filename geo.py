@@ -1,5 +1,6 @@
 """Terrain, conservative ground navigation and height-field visibility."""
 from pathlib import Path
+from collections import deque
 import heapq
 import hashlib
 import json
@@ -7,6 +8,14 @@ import math
 import time
 
 import numpy as np
+
+
+class BudgetExceeded(Exception):
+    pass
+
+
+class DecisionTimeout(BudgetExceeded):
+    pass
 
 
 def in_ring(x, y, ring):
@@ -24,6 +33,8 @@ class Geo:
     cell_size = 2.0
 
     def __init__(self, map_dir, cache=None):
+        self.deadline = math.inf
+        self._retired = deque()
         self.map_dir = Path(map_dir)
         self.world = json.loads((self.map_dir / 'v2/world.json').read_text())
         self.terrain_info = self.world['terrain']
@@ -81,7 +92,15 @@ class Geo:
         self.components = np.array(labels,dtype='i4').reshape(height,width)
 
     def ground(self, x, y):
+        self.check_budget()
         t = self.terrain_info
+        if np.isscalar(x) and np.isscalar(y):
+            fx = min(max((float(x)-t['minX'])/t['step'],0),t['nx']-1)
+            fy = min(max((float(y)-t['minY'])/t['step'],0),t['ny']-1)
+            i,j = min(int(fx),t['nx']-2),min(int(fy),t['ny']-2)
+            u,v = fx-i,fy-j
+            a = self.terrain
+            return (float(a[j,i])*(1-u)+float(a[j,i+1])*u)*(1-v)+(float(a[j+1,i])*(1-u)+float(a[j+1,i+1])*u)*v
         fx = np.clip((np.asarray(x)-t['minX'])/t['step'], 0, t['nx']-1)
         fy = np.clip((np.asarray(y)-t['minY'])/t['step'], 0, t['ny']-1)
         i = np.minimum(fx.astype(int), t['nx']-2)
@@ -128,35 +147,77 @@ class Geo:
         np.savez_compressed(path, signature=self.signature, origin=self.origin, ground=self.ground_grid, solid_top=self.solid_top, walkable=self.walkable, components=self.components, raw_walkable=self.raw_walkable)
 
     def cell(self, point):
-        return (math.floor((point[0]-self.origin[0])/2), math.floor((point[1]-self.origin[1])/2))
+        return (math.floor((point[0]-float(self.origin[0]))/2), math.floor((point[1]-float(self.origin[1]))/2))
 
     def point(self, cell):
-        return (float(self.origin[0]+2*cell[0]+1), float(self.origin[1]+2*cell[1]+1))
+        return (float(self.origin[0])+2*cell[0]+1, float(self.origin[1])+2*cell[1]+1)
+
+    def check_budget(self):
+        if time.perf_counter() >= self.deadline:
+            raise BudgetExceeded
+
+    def collect_retired(self, deadline):
+        while self._retired and time.perf_counter() < min(deadline,self.deadline):
+            containers = self._retired[0]
+            if not containers:
+                self._retired.popleft()
+            elif not containers[-1]:
+                containers.pop()
+            elif isinstance(containers[-1],dict):
+                containers[-1].popitem()
+            else:
+                containers[-1].pop()
 
     def is_walkable(self, cell):
         x,y = cell
         return 0 <= x < self.width and 0 <= y < self.height and self._walk[y][x]
 
     def nearest(self, point, radius=20):
+        work = self._nearest(point,radius)
+        while True:
+            self.check_budget()
+            try:
+                next(work)
+            except StopIteration as result:
+                return result.value
+
+    def _nearest(self, point, radius=20):
         c = self.cell(point)
         if self.is_walkable(c):
             return c
         for r in range(1, radius+1):
-            candidates = [(c[0]+dx,c[1]+dy) for dy in range(-r,r+1) for dx in range(-r,r+1) if max(abs(dx),abs(dy)) == r]
-            candidates = [p for p in candidates if self.is_walkable(p)]
-            if candidates:
-                return min(candidates, key=lambda p: math.dist(self.point(p),point[:2]))
+            best,distance = None,math.inf
+            for dy in range(-r,r+1):
+                for dx in (range(-r,r+1) if abs(dy) == r else (-r,r)):
+                    yield
+                    p = (c[0]+dx,c[1]+dy)
+                    if self.is_walkable(p):
+                        d = math.dist(self.point(p),point[:2])
+                        if d < distance:
+                            best,distance = p,d
+            if best is not None:
+                return best
         return None
 
     def walk_clear(self, a, b):
         """Supercover traversal, including both sides of corner crossings."""
+        work = self._walk_clear(a,b)
+        while True:
+            self.check_budget()
+            try:
+                next(work)
+            except StopIteration as result:
+                return result.value
+
+    def _walk_clear(self, a, b):
         x,y = self.cell(a)
         ex,ey = self.cell(b)
         dx,dy = b[0]-a[0], b[1]-a[1]
         sx,sy = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
-        tx = ((self.origin[0]+2*(x+(sx>0))-a[0])/dx) if dx else math.inf
-        ty = ((self.origin[1]+2*(y+(sy>0))-a[1])/dy) if dy else math.inf
+        tx = ((float(self.origin[0])+2*(x+(sx>0))-a[0])/dx) if dx else math.inf
+        ty = ((float(self.origin[1])+2*(y+(sy>0))-a[1])/dy) if dy else math.inf
         while True:
+            yield
             if not self.is_walkable((x,y)):
                 return False
             if (x,y) == (ex,ey):
@@ -178,13 +239,19 @@ class Geo:
         return search.path
 
     def los(self, a, b):
-        a,b = np.asarray(a,dtype=float),np.asarray(b,dtype=float)
-        count = max(2,math.ceil(float(np.linalg.norm(b-a))/2)+1)
-        points = a+(b-a)*np.linspace(0,1,count)[:,None]
-        cells = np.floor((points[:,:2]-self.origin)/2).astype(int)
-        if np.any(cells < 0) or np.any(cells[:,0] >= self.width) or np.any(cells[:,1] >= self.height):
-            return False
-        return bool(np.all(points[:,2] >= self.occluder[cells[:,1],cells[:,0]]))
+        ax,ay,az = map(float,a)
+        bx,by,bz = map(float,b)
+        dx,dy,dz = bx-ax,by-ay,bz-az
+        count = max(1,math.ceil(math.sqrt(dx*dx+dy*dy+dz*dz)/2))
+        ox,oy = map(float,self.origin)
+        for i in range(count+1):
+            self.check_budget()
+            t = i/count
+            x,y,z = (bx,by,bz) if i == count else (ax+dx*t,ay+dy*t,az+dz*t)
+            cx,cy = math.floor((x-ox)/2),math.floor((y-oy)/2)
+            if not (0 <= cx < self.width and 0 <= cy < self.height) or z < float(self.occluder[cy,cx]):
+                return False
+        return True
 
     def search(self, start, goal):
         return PathSearch(self, start, goal)
@@ -195,16 +262,30 @@ class Geo:
         return sum(not self.los((t[0],t[1],t[2]+8),target) for t in threat_positions)
 
     def find_cover(self, me, threats, zone, time_budget_ms=12):
-        deadline = time.perf_counter()+time_budget_ms/1000
+        previous = self.deadline
+        self.deadline = min(previous,time.perf_counter()+time_budget_ms/1000)
+        best = [None]
+        try:
+            self._find_cover(me,threats,zone,best)
+        except DecisionTimeout:
+            raise
+        except BudgetExceeded:
+            if time.perf_counter() >= previous:
+                raise
+        finally:
+            self.deadline = previous
+        return best[0]
+
+    def _find_cover(self, me, threats, zone, best):
+        self.check_budget()
         center = zone.get('next_center',zone['center'])
         radius = zone.get('next_radius',zone['radius'])
         cx,cy = self.cell(me)
         candidates = [(cx+dx,cy+dy) for dy in range(-30,31,3) for dx in range(-30,31,3) if dx*dx+dy*dy <= 900]
         candidates.sort(key=lambda p:(p[0]-cx)**2+(p[1]-cy)**2)
-        best,score = None,-math.inf
+        score = -math.inf
         for cell in candidates:
-            if time.perf_counter() >= deadline:
-                break
+            self.check_budget()
             if not self.is_walkable(cell):
                 continue
             point = self.point(cell)
@@ -212,12 +293,15 @@ class Geo:
                 continue
             x,y = cell
             wall = any(not self.is_walkable((x+dx,y+dy)) for dx,dy in ((3,0),(-3,0),(0,3),(0,-3)))
-            nearby_top = float(np.max(self.occluder[max(0,y-4):y+5,max(0,x-4):x+5]))
+            nearby_top = -math.inf
+            for yy in range(max(0,y-4),min(self.height,y+5)):
+                self.check_budget()
+                for xx in range(max(0,x-4),min(self.width,x+5)):
+                    nearby_top = max(nearby_top,float(self.occluder[yy,xx]))
             height = max(0,nearby_top-float(self.ground(*point)))
             value = 8*wall+.2*min(40,height)-math.dist(point,me[:2])
             if value > score:
-                best,score = point,value
-        return best
+                best[0],score = point,value
 
 
 class PathSearch:
@@ -228,14 +312,16 @@ class PathSearch:
         self.status = 'pending'
         self.path = []
         self._expansions = [0]
-        self._work = self._run(geo,start,goal,self._expansions)
+        self._containers = []
+        self._work = self._run(geo,start,goal,self._expansions,self._containers)
 
     @property
     def expansions(self):
         return self._expansions[0]
 
     def advance(self, budget_ms=8):
-        deadline = time.perf_counter()+budget_ms/1000
+        deadline = min(self.geo.deadline,time.perf_counter()+budget_ms/1000)
+        self.geo.collect_retired(min(deadline,time.perf_counter()+.0002))
         while self.status == 'pending' and time.perf_counter() < deadline:
             try:
                 next(self._work)
@@ -246,12 +332,16 @@ class PathSearch:
 
     def close(self):
         self._work.close()
+        if any(self._containers):
+            self.geo._retired.append(self._containers)
+        self._containers = []
         self.path = []
         self.status = 'unreachable'
 
     @staticmethod
-    def _run(geo, start, goal, expansions):
-        source, target = geo.nearest(start), geo.nearest(goal)
+    def _run(geo, start, goal, expansions, containers):
+        source = yield from geo._nearest(start)
+        target = yield from geo._nearest(goal)
         if source is None or target is None:
             return []
         if geo.components[source[1],source[0]] != geo.components[target[1],target[0]]:
@@ -259,9 +349,9 @@ class PathSearch:
         h = lambda p: max(abs(p[0]-target[0]),abs(p[1]-target[1])) + (math.sqrt(2)-1)*min(abs(p[0]-target[0]),abs(p[1]-target[1]))
         queue = [(h(source),0,source)]
         costs, parents = {source:0}, {}
+        containers.extend((queue,costs,parents))
         while queue:
-            if expansions[0] % 32 == 0:
-                yield
+            yield
             _,cost,current = heapq.heappop(queue)
             if cost != costs[current]:
                 # Stale heap entries must also yield under the budget.
@@ -272,6 +362,7 @@ class PathSearch:
                 break
             x,y = current
             for dx,dy in ((1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)):
+                yield
                 nxt = (x+dx,y+dy)
                 if not geo.is_walkable(nxt):
                     continue
@@ -282,18 +373,43 @@ class PathSearch:
                     costs[nxt],parents[nxt] = g,current
                     heapq.heappush(queue,(g+h(nxt),g,nxt))
         else:
+            for container in containers:
+                while container:
+                    yield
+                    if isinstance(container,dict):
+                        container.popitem()
+                    else:
+                        container.pop()
             return []
         path = [target]
+        containers.append(path)
         while path[-1] in parents:
+            yield
             path.append(parents[path[-1]])
-        points = [geo.point(p) for p in reversed(path)]
+        points = []
+        containers.append(points)
+        for p in reversed(path):
+            yield
+            points.append(geo.point(p))
+        while queue:
+            yield
+            queue.pop()
+        while parents:
+            yield
+            parents.popitem()
+        while costs:
+            yield
+            costs.popitem()
+        while path:
+            yield
+            path.pop()
         result, anchor = points[:1],0
         while anchor < len(points)-1:
             # Exponential lookahead avoids quadratic tracing on long open routes.
             stride, last = 1,anchor+1
             while anchor+stride < len(points):
                 yield
-                if not geo.walk_clear(points[anchor],points[anchor+stride]):
+                if not (yield from geo._walk_clear(points[anchor],points[anchor+stride])):
                     break
                 last = anchor+stride
                 stride *= 2
@@ -301,13 +417,16 @@ class PathSearch:
             while upper-last > 1:
                 mid = (last+upper)//2
                 yield
-                if geo.walk_clear(points[anchor],points[mid]):
+                if (yield from geo._walk_clear(points[anchor],points[mid])):
                     last = mid
                 else:
                     upper = mid
             yield
-            if geo.walk_clear(points[anchor],points[upper]):
+            if (yield from geo._walk_clear(points[anchor],points[upper])):
                 last = upper
             result.append(points[last])
             anchor = last
+        while points:
+            yield
+            points.pop()
         return result

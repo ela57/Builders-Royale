@@ -7,6 +7,18 @@ safe loot/drop detours, cover hiding/sound scans and stuck jump/jet recovery.
 Mortars are intentionally not collected or fired (the design's v1 option).
 The conformance recording is not a simulation or evidence of match strength.
 
+Decisions use a cooperative 13 ms work deadline and a POSIX 14 ms wall-timer
+backstop on the main thread, leaving headroom below 20 ms. Existing external
+timers are left alone; platforms/threads without wall timers use cooperative
+checks only. The previous signal handler is restored after each decision.
+Geometry loops and cover candidates check the deadline; searches yield through
+endpoint selection, expansion, reconstruction, cleanup and smoothing. Cancelled
+search storage is reclaimed incrementally rather than freed in one call. A
+deadline fallback keeps the previous movement/torso aim and suppresses firing;
+an alarm also cancels an interrupted search safely. This cannot preempt an
+arbitrary long C call or bound external descheduling/OS pauses; automatic
+GC stays enabled. Tactical priorities and geometric sampling are unchanged.
+
 ## Run
 
 Python 3.12+ with `numpy==2.1.3` (the image uses Python 3.13):

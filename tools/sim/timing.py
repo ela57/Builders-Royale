@@ -54,11 +54,11 @@ def trace_calls():
         return measured
 
     for cls,names in ((Bot,('_cover','_zone_goal','_explore','_loot_goal','_avoid_npcs')),
-                      (Memory,('update',)),(Geo,('nearest','walk_clear','los','find_cover')),
+                      (Memory,('update',)),(Geo,('ground','nearest','walk_clear','los','cover_score','find_cover')),
                       (Navigator,('move','invalidate')),(PathSearch,('advance','close'))):
         for name in names:
             setattr(cls,name,wrap(getattr(cls,name),cls.__name__+'.'+name))
-    for owner,names in ((np,('asarray','linspace','floor','any','all')),(np.linalg,('norm',))):
+    for owner,names in ((np,('asarray','linspace','floor','any','all','max','clip','minimum')),(np.linalg,('norm',))):
         for name in names:
             setattr(owner,name,wrap(getattr(owner,name),'numpy.'+name))
 
